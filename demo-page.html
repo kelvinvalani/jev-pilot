@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Flight search playground — Jev Fast</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        background: #f3f6fb;
+        color: #142033;
+      }
+      header {
+        background: #0b1b33;
+        color: #fff;
+        padding: 28px 20px 24px;
+      }
+      main {
+        max-width: 720px;
+        margin: -28px auto 40px;
+        padding: 0 16px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+      }
+      .lede {
+        margin: 8px 0 0;
+        color: #c9d6ea;
+        max-width: 40rem;
+      }
+      form {
+        background: #fff;
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 16px 40px rgba(11, 27, 51, 0.12);
+        display: grid;
+        gap: 12px;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+      input,
+      select {
+        height: 42px;
+        border: 1px solid #d5deea;
+        border-radius: 10px;
+        padding: 0 12px;
+        font: inherit;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      button[type="submit"] {
+        height: 44px;
+        border: 0;
+        border-radius: 10px;
+        background: #12845a;
+        color: #fff;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .results {
+        margin-top: 16px;
+        display: grid;
+        gap: 10px;
+      }
+      .card {
+        background: #fff;
+        border-radius: 12px;
+        padding: 14px 16px;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        box-shadow: 0 8px 24px rgba(11, 27, 51, 0.08);
+      }
+      .muted {
+        color: #5b6b82;
+        font-size: 13px;
+      }
+      .empty {
+        margin-top: 16px;
+        color: #5b6b82;
+      }
+      @media (max-width: 640px) {
+        .row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Northwind Flights</h1>
+      <p class="lede">
+        Local playground for Jev Fast. Load the unpacked extension, open this page,
+        and run the goal “Search for flights from Melbourne to Tokyo”.
+      </p>
+    </header>
+    <main>
+      <form id="searchForm">
+        <div class="row">
+          <label>
+            Origin
+            <input id="origin" name="origin" type="text" placeholder="City or airport" />
+          </label>
+          <label>
+            Destination
+            <input id="destination" name="destination" type="text" placeholder="City or airport" />
+          </label>
+        </div>
+        <div class="row">
+          <label>
+            Depart
+            <input id="depart" name="depart" type="date" />
+          </label>
+          <label>
+            Cabin
+            <select id="cabin" name="cabin">
+              <option value="economy">Economy</option>
+              <option value="premium">Premium economy</option>
+              <option value="business">Business</option>
+            </select>
+          </label>
+        </div>
+        <button type="submit">Search flights</button>
+      </form>
+      <p id="empty" class="empty">No search yet. Fill origin and destination, then search.</p>
+      <div id="results" class="results" hidden></div>
+    </main>
+    <script>
+      const form = document.getElementById("searchForm");
+      const results = document.getElementById("results");
+      const empty = document.getElementById("empty");
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const origin = document.getElementById("origin").value.trim() || "Unknown origin";
+        const destination = document.getElementById("destination").value.trim() || "Unknown destination";
+        empty.hidden = true;
+        results.hidden = false;
+        results.innerHTML = "";
+        const flights = [
+          { id: "NW418", time: "08:15 → 16:40", price: "$742" },
+          { id: "NW902", time: "22:05 → 06:55+1", price: "$688" },
+        ];
+        for (const flight of flights) {
+          const card = document.createElement("div");
+          card.className = "card";
+          card.innerHTML =
+            "<div><strong>" +
+            flight.id +
+            "</strong><div class='muted'>" +
+            origin +
+            " to " +
+            destination +
+            " · " +
+            flight.time +
+            "</div></div>";
+          const book = document.createElement("button");
+          book.type = "button";
+          book.textContent = "Book " + flight.price;
+          book.addEventListener("click", () => {
+            book.textContent = "Booked";
+            book.disabled = true;
+          });
+          card.appendChild(book);
+          results.appendChild(card);
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jev Fast</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="top">
+        <div class="brand">
+          <img class="logo" src="icons/icon48.png" alt="" width="28" height="28" />
+          <div>
+            <h1>Jev Fast</h1>
+            <p class="tagline">Page-native actions. Jev decides in one pass.</p>
+          </div>
+        </div>
+        <div id="statusChip" class="chip idle" data-state="idle">Idle</div>
+      </header>
+
+      <section class="panel" aria-labelledby="provider-label">
+        <label id="provider-label" for="provider">Jev provider</label>
+        <select id="provider">
+          <option value="beatapi" selected>BeatAPI — free jev-1.13-free</option>
+          <option value="typesafe">TypeSafe — jev-latest</option>
+        </select>
+        <p class="provider-note" id="providerNote">
+          BeatAPI free tier: 1 request per minute until you top up. No TypeSafe key needed.
+        </p>
+      </section>
+
+      <section class="panel" aria-labelledby="key-label">
+        <div class="field-head">
+          <label id="key-label" for="apiKey">BeatAPI API key</label>
+          <span class="hint" id="keySaved" hidden>Saved</span>
+        </div>
+        <div class="key-row">
+          <input
+            id="apiKey"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="BEATAPI_API_KEY"
+          />
+          <button id="toggleKey" class="ghost" type="button" aria-label="Show API key">Show</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="goal-label">
+        <label id="goal-label" for="goal">User goal</label>
+        <textarea
+          id="goal"
+          rows="3"
+          maxlength="2000"
+          placeholder="Search for flights from Melbourne to Tokyo"
+        ></textarea>
+        <div class="meta-row">
+          <span id="goalCount">0 / 2000</span>
+          <span>Max 15 steps · pause below 0.60 confidence</span>
+        </div>
+      </section>
+
+      <div class="actions">
+        <button id="startBtn" class="primary" type="button">Start</button>
+        <button id="stopBtn" class="danger" type="button" disabled>Stop</button>
+      </div>
+
+      <div id="confirmBar" class="confirm" hidden>
+        <p id="confirmText"></p>
+        <div id="confirmTextRow" class="confirm-text" hidden>
+          <input id="confirmInput" type="text" placeholder="Text to type" />
+        </div>
+        <div class="confirm-actions">
+          <button id="confirmBtn" class="primary" type="button">Confirm</button>
+          <button id="skipBtn" class="ghost" type="button">Skip</button>
+          <button id="confirmStopBtn" class="danger" type="button">Stop</button>
+        </div>
+      </div>
+
+      <section class="log-panel" aria-labelledby="log-label">
+        <div class="field-head">
+          <h2 id="log-label">Execution log</h2>
+          <button id="clearLog" class="link" type="button">Clear</button>
+        </div>
+        <div id="log" class="log" role="log" aria-live="polite">
+          <p class="empty" id="emptyLog">
+            Start a goal on the active tab. Each step records action, target element,
+            Jev confidence, and API latency.
+          </p>
+        </div>
+      </section>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

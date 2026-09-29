@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jev Fast</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(900px 420px at 20% -10%, rgba(61, 220, 151, 0.12), transparent 50%),
+          #07090c;
+        color: #e8eef6;
+      }
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 32px 16px 48px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 400px;
+        gap: 28px;
+        align-items: start;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+      }
+      .lede {
+        color: #8b9bb0;
+        line-height: 1.5;
+        margin: 0 0 18px;
+      }
+      ol {
+        margin: 0;
+        padding-left: 18px;
+        color: #c5d0de;
+        line-height: 1.55;
+      }
+      a {
+        color: #3ddc97;
+      }
+      iframe {
+        width: 380px;
+        height: 640px;
+        border: 1px solid #2a3646;
+        border-radius: 16px;
+        background: #0b0f14;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
+      }
+      .frame-note {
+        margin: 10px 0 0;
+        color: #8b9bb0;
+        font-size: 12px;
+      }
+      @media (max-width: 840px) {
+        .wrap {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <section>
+        <h1>Jev Fast</h1>
+        <p class="lede">
+          Manifest V3 Chrome extension. Jev picks the next click or keystroke from the live DOM;
+          the page executes it. This page is a UI preview — load the folder as an unpacked
+          extension to control a real tab.
+        </p>
+        <ol>
+          <li>Open <code>chrome://extensions</code> and enable Developer mode.</li>
+          <li>Load unpacked and select this project folder.</li>
+          <li>Choose BeatAPI or TypeSafe, paste that provider’s key, open a site (or <a href="./demo-page.html">the flight playground</a>), and start a goal.</li>
+        </ol>
+      </section>
+      <section>
+        <iframe src="./popup.html" title="Jev Fast popup preview"></iframe>
+        <p class="frame-note">Interactive preview of the extension popup. Start runs a canned demo log.</p>
+      </section>
+    </div>
+  </body>
+</html>
