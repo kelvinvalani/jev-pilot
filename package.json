@@ -1,0 +1,14 @@
+{
+  "name": "jev-fast",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Jev Fast Chrome extension — typed JEV browser automation.",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "check": "node scripts/check.js",
+    "preview": "python3 -m http.server 41785 --bind 127.0.0.1"
+  },
+  "devDependencies": {
+    "jsdom": "27.4.0"
+  }
+}

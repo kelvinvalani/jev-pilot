@@ -1,9 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Jev Fast",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "High-speed page automation powered by Jev via BeatAPI or TypeSafe. Bounded Choice and Noul decisions over the live DOM — no generated code.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
   "host_permissions": [
     "https://*/*",
     "http://*/*",
@@ -13,6 +17,31 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "js": [
+        "launcher.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "popup.html",
+        "popup.css",
+        "popup.js"
+      ],
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ]
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "Jev Fast",

@@ -7,89 +7,183 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <div class="shell">
-      <header class="top">
+    <div class="app" id="app">
+      <header class="header">
         <div class="brand">
-          <img class="logo" src="icons/icon48.png" alt="" width="28" height="28" />
-          <div>
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5H12L11 22l8.5-11.5H12L13 2Z"/></svg>
+          </span>
+          <div class="brand-text">
             <h1>Jev Fast</h1>
-            <p class="tagline">Page-native actions. Jev decides in one pass.</p>
+            <p id="headerSub">Automate this page</p>
           </div>
         </div>
-        <div id="statusChip" class="chip idle" data-state="idle">Idle</div>
+        <div class="header-actions">
+          <span id="statusPill" class="pill" data-state="idle" role="status">
+            <span class="pill-dot" aria-hidden="true"></span>
+            <span id="statusText">Ready</span>
+          </span>
+          <button id="settingsBtn" class="icon-btn" type="button" aria-label="Settings" aria-pressed="false" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+          </button>
+          <button id="closeBtn" class="icon-btn" type="button" aria-label="Close" title="Close (Esc)" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
       </header>
 
-      <section class="panel" aria-labelledby="provider-label">
-        <label id="provider-label" for="provider">Jev provider</label>
-        <select id="provider">
-          <option value="beatapi" selected>BeatAPI — free jev-1.13-free</option>
-          <option value="typesafe">TypeSafe — jev-latest</option>
-        </select>
-        <p class="provider-note" id="providerNote">
-          BeatAPI free tier: 1 request per minute until you top up. No TypeSafe key needed.
-        </p>
-      </section>
+      <main class="body">
+        <!-- Settings -->
+        <section id="settingsView" class="view" aria-labelledby="settingsTitle" hidden>
+          <div class="view-head">
+            <h2 id="settingsTitle">Settings</h2>
+            <p class="muted">Your key stays in Chrome sync storage and is only sent to the provider you pick.</p>
+          </div>
 
-      <section class="panel" aria-labelledby="key-label">
-        <div class="field-head">
-          <label id="key-label" for="apiKey">BeatAPI API key</label>
-          <span class="hint" id="keySaved" hidden>Saved</span>
-        </div>
-        <div class="key-row">
-          <input
-            id="apiKey"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="BEATAPI_API_KEY"
-          />
-          <button id="toggleKey" class="ghost" type="button" aria-label="Show API key">Show</button>
-        </div>
-      </section>
+          <fieldset class="field">
+            <legend>Provider</legend>
+            <div class="choice-list" id="providerChoices">
+              <label class="choice">
+                <input type="radio" name="provider" value="beatapi" checked />
+                <span class="choice-body">
+                  <span class="choice-title">BeatAPI <span class="tag">Free</span></span>
+                  <span class="choice-desc">jev-1.13-free · 1 request/min until you top up</span>
+                </span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="provider" value="typesafe" />
+                <span class="choice-body">
+                  <span class="choice-title">TypeSafe</span>
+                  <span class="choice-desc">jev-latest · official console key</span>
+                </span>
+              </label>
+            </div>
+          </fieldset>
 
-      <section class="panel" aria-labelledby="goal-label">
-        <label id="goal-label" for="goal">User goal</label>
-        <textarea
-          id="goal"
-          rows="3"
-          maxlength="2000"
-          placeholder="Search for flights from Melbourne to Tokyo"
-        ></textarea>
-        <div class="meta-row">
-          <span id="goalCount">0 / 2000</span>
-          <span>Max 15 steps · pause below 0.60 confidence</span>
-        </div>
-      </section>
+          <div class="field">
+            <div class="field-head">
+              <label for="apiKey" id="keyLabel">BeatAPI API key</label>
+              <span id="keySaved" class="saved" hidden>Saved</span>
+            </div>
+            <div class="input-group">
+              <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your BeatAPI key" />
+              <button id="toggleKey" class="input-addon" type="button" aria-label="Show API key">Show</button>
+            </div>
+            <p class="help">
+              <a id="keyLink" href="https://beatapi.io/dashboard/apikeys" target="_blank" rel="noopener noreferrer">Get a BeatAPI key</a>
+              <span id="keyHint"> · Keys are per provider and not interchangeable.</span>
+            </p>
+          </div>
 
-      <div class="actions">
-        <button id="startBtn" class="primary" type="button">Start</button>
-        <button id="stopBtn" class="danger" type="button" disabled>Stop</button>
-      </div>
+          <label class="switch-row" for="showLauncher">
+            <span>
+              <span class="switch-title">Floating button on pages</span>
+              <span class="switch-desc">Show the Jev button in the bottom-right corner of websites.</span>
+            </span>
+            <span class="switch">
+              <input id="showLauncher" type="checkbox" checked />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
 
-      <div id="confirmBar" class="confirm" hidden>
-        <p id="confirmText"></p>
-        <div id="confirmTextRow" class="confirm-text" hidden>
-          <input id="confirmInput" type="text" placeholder="Text to type" />
-        </div>
-        <div class="confirm-actions">
-          <button id="confirmBtn" class="primary" type="button">Confirm</button>
-          <button id="skipBtn" class="ghost" type="button">Skip</button>
-          <button id="confirmStopBtn" class="danger" type="button">Stop</button>
-        </div>
-      </div>
+          <button id="settingsDone" class="btn btn-primary btn-block" type="button">Done</button>
+        </section>
 
-      <section class="log-panel" aria-labelledby="log-label">
-        <div class="field-head">
-          <h2 id="log-label">Execution log</h2>
-          <button id="clearLog" class="link" type="button">Clear</button>
-        </div>
-        <div id="log" class="log" role="log" aria-live="polite">
-          <p class="empty" id="emptyLog">
-            Start a goal on the active tab. Each step records action, target element,
-            Jev confidence, and API latency.
-          </p>
-        </div>
-      </section>
+        <!-- Main -->
+        <section id="mainView" class="view" aria-label="Task">
+          <div id="setupCard" class="callout callout-info" hidden>
+            <div>
+              <p class="callout-title">Connect Jev to get started</p>
+              <p class="callout-text">Add a BeatAPI (free) or TypeSafe API key.</p>
+            </div>
+            <button id="setupBtn" class="btn btn-secondary btn-sm" type="button">Add key</button>
+          </div>
+
+          <form id="taskForm" class="card composer" novalidate>
+            <label for="goal" class="composer-label">What should Jev do on this page?</label>
+            <textarea id="goal" rows="3" maxlength="2000" placeholder="e.g. Search for flights from Melbourne to Tokyo"></textarea>
+            <div class="examples" id="examples" aria-label="Examples">
+              <button type="button" class="chip" data-example="Search for flights from Melbourne to Tokyo">Flights Melbourne → Tokyo</button>
+              <button type="button" class="chip" data-example="Search for &quot;wireless headphones&quot;">Search “wireless headphones”</button>
+              <button type="button" class="chip" data-example="Click the sign in button">Click sign in</button>
+            </div>
+            <div class="composer-foot">
+              <span id="goalCount" class="muted small">0 / 2000</span>
+              <button id="startBtn" class="btn btn-primary" type="submit">
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.9l10-6.5a1 1 0 0 0 0-1.8l-10-6.5A1 1 0 0 0 8 5.5Z"/></svg>
+                Run
+              </button>
+            </div>
+            <p id="formError" class="form-error" role="alert" hidden></p>
+          </form>
+
+          <section id="runCard" class="card run-card" aria-live="polite" hidden>
+            <div class="run-head">
+              <div class="run-goal">
+                <p class="eyebrow">Working on</p>
+                <p id="runGoal" class="run-goal-text"></p>
+              </div>
+              <button id="stopBtn" class="btn btn-danger btn-sm" type="button">
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                Stop
+              </button>
+            </div>
+            <div class="progress" role="progressbar" aria-label="Steps used" aria-valuemin="0" aria-valuemax="15" aria-valuenow="0" id="progress">
+              <span id="progressBar"></span>
+            </div>
+            <p id="runMeta" class="muted small"></p>
+            <p id="waitNotice" class="wait-notice" hidden></p>
+          </section>
+
+          <section id="confirmCard" class="card review-card" role="group" aria-labelledby="confirmTitle" hidden>
+            <p class="eyebrow eyebrow-warn">Needs your OK</p>
+            <h3 id="confirmTitle">Review this step</h3>
+            <p id="confirmText" class="review-text"></p>
+            <div class="proposal">
+              <span id="confirmAction" class="action-badge">CLICK</span>
+              <span id="confirmTarget" class="proposal-target"></span>
+              <span id="confirmConfidence" class="confidence-tag"></span>
+            </div>
+            <div id="confirmTextRow" class="field" hidden>
+              <label for="confirmInput">Text to type</label>
+              <input id="confirmInput" type="text" placeholder="Enter the text Jev should type" />
+            </div>
+            <div class="button-row">
+              <button id="confirmBtn" class="btn btn-primary" type="button">Run this step</button>
+              <button id="skipBtn" class="btn btn-secondary" type="button">Skip</button>
+              <button id="confirmStopBtn" class="btn btn-ghost" type="button">Stop task</button>
+            </div>
+          </section>
+
+          <section id="resultCard" class="callout" role="status" hidden>
+            <span id="resultIcon" class="callout-icon" aria-hidden="true"></span>
+            <div>
+              <p id="resultTitle" class="callout-title"></p>
+              <p id="resultText" class="callout-text"></p>
+            </div>
+          </section>
+
+          <section class="activity" aria-labelledby="activityTitle">
+            <div class="section-head">
+              <h2 id="activityTitle">Activity</h2>
+              <div class="section-actions">
+                <button id="copyLog" class="link-btn" type="button" hidden>Copy</button>
+                <button id="clearLog" class="link-btn" type="button" hidden>Clear</button>
+              </div>
+            </div>
+            <ol id="timeline" class="timeline" role="log" aria-live="polite"></ol>
+            <div id="emptyLog" class="empty">
+              <p class="empty-title">No activity yet</p>
+              <p class="empty-text">Describe a task and press Run. Each step shows what Jev did, how confident it was, and how long it took.</p>
+            </div>
+          </section>
+        </main>
+
+      <footer class="footer">
+        <span>Up to 15 steps</span>
+        <span aria-hidden="true">·</span>
+        <span>Asks before acting below 60% confidence</span>
+      </footer>
     </div>
     <script src="popup.js"></script>
   </body>
