@@ -40,7 +40,8 @@ API calls are designed not to waste requests:
 | Response | What happens |
 | --- | --- |
 | 429 | Waits for `Retry-After` (or `retry_after_seconds`, or 60s on BeatAPI free), then paces later requests to that interval. Up to 4 retries. |
-| 529 / 5xx | Up to 2 retries with backoff, unless the error says `retryable: false`. |
+| 529 | Treated like a rate limit (backoff, up to 4 retries). |
+| 5xx | One retry (as BeatAPI recommends for sync calls), unless the error says `retryable: false`. Errors show the `request_id` for support. |
 | Network error / 12s timeout | Up to 2 retries. |
 | 400, 401, 402, 403, 404, 422 | No retry; the run stops with a message saying what to fix (wrong key for provider, no credits, unknown model, …). |
 | Malformed answers (missing typed Choice, unknown element id, unsupported action) | No retry, no page action; the run stops with an explanation. |

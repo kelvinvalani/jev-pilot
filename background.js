@@ -32,6 +32,7 @@ const COMPLEX_TEXT_THRESHOLD = 0.7;
 const LOG_LIMIT = 200;
 const MAX_RATE_LIMIT_RETRIES = 4;
 const MAX_SERVER_RETRIES = 2;
+const MAX_HTTP_5XX_RETRIES = 1;
 const KEEPALIVE_INTERVAL_MS = 20000;
 const EXTRACT_ATTEMPTS = 3;
 const ACTION_TYPES = ["click", "type", "finish"];
@@ -614,6 +615,7 @@ async function callJev(apiKey, body, generation) {
   const provider = session.provider || PROVIDERS.beatapi;
   let rateLimitRetries = 0;
   let serverRetries = 0;
+  let http5xxRetries = 0;
 
   for (;;) {
     await paceRequests(generation);
@@ -685,10 +687,10 @@ async function callJev(apiKey, body, generation) {
       continue;
     }
 
-    if (response.status >= 500 && serverRetries < MAX_SERVER_RETRIES && apiError.retryable !== false) {
-      serverRetries += 1;
-      log("warn", "Jev server error (HTTP " + response.status + ") — retrying (" + serverRetries + "/" + MAX_SERVER_RETRIES + ").");
-      await waitWithStatus(1000 * serverRetries, "Retrying after a server error", generation);
+    if (response.status >= 500 && http5xxRetries < MAX_HTTP_5XX_RETRIES && apiError.retryable !== false) {
+      http5xxRetries += 1;
+      log("warn", "Jev server error (HTTP " + response.status + ") — retrying (" + http5xxRetries + "/" + MAX_HTTP_5XX_RETRIES + ").");
+      await waitWithStatus(1000 * http5xxRetries, "Retrying after a server error", generation);
       continue;
     }
 
@@ -726,7 +728,7 @@ async function waitWithStatus(ms, reason, generation) {
 }
 
 function readApiError(payload) {
-  const out = { message: "", code: "", retryable: undefined, retryAfter: NaN };
+  const out = { message: "", code: "", retryable: undefined, retryAfter: NaN, requestId: "" };
   if (!payload || typeof payload !== "object") return out;
   const err = payload.error;
   if (err && typeof err === "object") {
@@ -734,6 +736,7 @@ function readApiError(payload) {
     out.code = String(err.code || err.type || "");
     if (typeof err.retryable === "boolean") out.retryable = err.retryable;
     if (typeof err.retry_after_seconds === "number") out.retryAfter = err.retry_after_seconds;
+    if (err.request_id) out.requestId = String(err.request_id);
   } else if (typeof err === "string") {
     out.message = err;
   }
@@ -757,6 +760,11 @@ function retryAfterSeconds(response, apiError, provider, attempt) {
 }
 
 function describeHttpError(status, apiError, provider) {
+  const message = httpErrorMessage(status, apiError, provider);
+  return apiError.requestId ? message + " Request ID: " + apiError.requestId : message;
+}
+
+function httpErrorMessage(status, apiError, provider) {
   const detail = apiError.message ? " (" + apiError.message + ")" : "";
   if (status === 401) {
     return (
@@ -765,7 +773,14 @@ function describeHttpError(status, apiError, provider) {
     );
   }
   if (status === 402) {
-    return provider.name + " says the account is out of credits (HTTP 402). Top up, or switch to the free BeatAPI model." + detail;
+    return (
+      provider.name +
+      " says the account is out of credits (HTTP 402)." +
+      (provider.id === "beatapi"
+        ? " Top up at beatapi.io/dashboard/billing, or check the model is jev-1.13-free."
+        : " Top up your balance to continue.") +
+      detail
+    );
   }
   if (status === 403) {
     return provider.name + " refused the request (HTTP 403). The account may be inactive." + detail;

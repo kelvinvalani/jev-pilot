@@ -238,18 +238,28 @@ test("429 retries are bounded (5 calls max) and end with a clear error", async (
   assert.match(state.lastError, /still rate-limiting/);
 });
 
-test("5xx is retried twice, then succeeds", async () => {
+test("5xx is retried once (per BeatAPI guidance), then succeeds", async () => {
   const bg = loadBackground({
     respond: flightScript({
       1: () => jsonResponse(503, errorBody(503, "unavailable", "upstream busy")),
-      2: () => jsonResponse(500, undefined),
-      3: () => ({ target: "none_applicable", action: "finish" }),
+      2: () => ({ target: "none_applicable", action: "finish" }),
     }),
   });
   await bg.start();
   const state = await bg.idle();
   assert.equal(state.finished, true, JSON.stringify(logTexts(state)));
-  assert.equal(bg.calls.length, 3);
+  assert.equal(bg.calls.length, 2);
+});
+
+test("a second consecutive 5xx stops the run after 2 calls and shows the request id", async () => {
+  const bg = loadBackground({
+    respond: () => jsonResponse(502, errorBody(502, "upstream_error", "model unavailable", { request_id: "req_abc123" })),
+  });
+  await bg.start();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 2);
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /HTTP 502.*model unavailable.*Request ID: req_abc123/);
 });
 
 test("5xx marked retryable:false fails immediately", async () => {
@@ -264,7 +274,7 @@ test("5xx marked retryable:false fails immediately", async () => {
 
 for (const [status, pattern] of [
   [401, /rejected this API key \(HTTP 401\)/],
-  [402, /out of credits \(HTTP 402\)/],
+  [402, /out of credits \(HTTP 402\)\. Top up at beatapi\.io\/dashboard\/billing/],
   [403, /refused the request \(HTTP 403\)/],
   [404, /does not recognise model “jev-1.13-free” \(HTTP 404\)/],
   [400, /rejected the request \(HTTP 400\) \(questions\.target_element_id\.criteria is empty\)/],

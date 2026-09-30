@@ -55,8 +55,18 @@ function answerFor(request, decision) {
   };
 }
 
+/** BeatAPI error envelope: {"error":{"code","message","retryable","request_id"}}. */
 function errorBody(status, code, message, extra) {
-  return { error: { type: code, code, message, status, ...(extra || {}) } };
+  seq += 1;
+  return {
+    error: {
+      code,
+      message,
+      retryable: status === 429 || status >= 500,
+      request_id: "req_mock_" + String(seq).padStart(4, "0"),
+      ...(extra || {}),
+    },
+  };
 }
 
 /** Find an element id whose criteria label matches `pattern`. */
