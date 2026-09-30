@@ -160,9 +160,6 @@
     el.dispatchEvent(new MouseEvent("pointerup", opts));
     el.dispatchEvent(new MouseEvent("mouseup", opts));
     el.dispatchEvent(new MouseEvent("click", opts));
-    if (typeof el.click === "function") {
-      el.click();
-    }
   }
 
   function typeInto(el, textValue) {
@@ -270,6 +267,13 @@
 
   function isEligible(el) {
     if (!(el instanceof HTMLElement)) return false;
+    const root = el.getRootNode();
+    if (
+      el.closest("[data-jev-fast-ui]") ||
+      (root instanceof ShadowRoot && root.host && root.host.id === "jev-fast-launcher-root")
+    ) {
+      return false;
+    }
     if (el.closest("script, style, noscript, template")) return false;
     if (el instanceof HTMLInputElement && String(el.type).toLowerCase() === "hidden") return false;
     if (el.getAttribute("aria-hidden") === "true") return false;
@@ -277,6 +281,11 @@
   }
 
   function isVisible(el) {
+    if (typeof el.checkVisibility === "function") {
+      if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+    } else if (hasHiddenAncestor(el)) {
+      return false;
+    }
     const style = window.getComputedStyle(el);
     if (!style) return false;
     if (style.display === "none" || style.visibility === "hidden") return false;
@@ -287,6 +296,17 @@
       return false;
     }
     return true;
+  }
+
+  function hasHiddenAncestor(el) {
+    let node = el.parentElement;
+    while (node) {
+      if (node.hidden) return true;
+      const style = window.getComputedStyle(node);
+      if (style && style.display === "none") return true;
+      node = node.parentElement;
+    }
+    return false;
   }
 
   function describeElement(el) {

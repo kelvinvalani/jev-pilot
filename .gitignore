@@ -2,3 +2,4 @@
 Thumbs.db
 agent-tools/
 *.log
+node_modules/
