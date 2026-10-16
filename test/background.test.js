@@ -63,7 +63,7 @@ test("request contract: endpoint, auth header, model, typed questions and state"
   assert.equal(first.init.headers["Content-Type"], "application/json");
 
   const body = first.request;
-  assert.equal(body.model, "jev-1.13-free");
+  assert.equal(body.model, "jev-1.14-free");
   assert.equal(body.state.user_goal, "Search for flights from Melbourne to Tokyo");
   assert.equal(body.state.step, 1);
   assert.equal(body.state.max_steps, 15);
@@ -74,7 +74,10 @@ test("request contract: endpoint, auth header, model, typed questions and state"
   assert.equal(q.target_element_id.type, "choice");
   assert.ok("none_applicable" in q.target_element_id.criteria);
   for (const el of body.state.interactive_elements) assert.ok(el.id in q.target_element_id.criteria);
-  assert.deepEqual(Object.keys(q.action_type.criteria), ["click", "type", "finish"]);
+  assert.deepEqual(Object.keys(q.action_type.criteria), ["click", "type", "submit", "finish"]);
+  assert.match(body.state.page_text, /No search yet/);
+  assert.deepEqual(body.state.completed_actions, []);
+  assert.match(q.target_element_id.criteria[findElement(body, ORIGIN)], /· empty$/);
   assert.equal(q.requires_complex_text.type, "noul");
   assert.deepEqual(Object.values(q.text_candidate.criteria), [
     "Type exactly: Melbourne",
@@ -83,6 +86,12 @@ test("request contract: endpoint, auth header, model, typed questions and state"
   ]);
 
   assert.equal(bg.calls[1].request.state.last_result.startsWith("Typed into"), true);
+  const second = bg.calls[1].request;
+  assert.match(second.questions.target_element_id.criteria[findElement(second, ORIGIN)], /current value: “Melbourne”/);
+  assert.equal(second.state.completed_actions.length, 1);
+  assert.match(second.state.completed_actions[0], /^Step 1: Typed into elem_\d+: Melbourne$/);
+  assert.match(bg.calls[3].request.state.page_text, /Melbourne to Tokyo · 08:15/);
+  assert.doesNotMatch(bg.calls[3].request.state.page_text, /No search yet/);
   assert.equal(bg.calls[3].request.state.last_result.startsWith("Clicked"), true);
 });
 
@@ -276,7 +285,7 @@ for (const [status, pattern] of [
   [401, /rejected this API key \(HTTP 401\)/],
   [402, /out of credits \(HTTP 402\)\. Top up at beatapi\.io\/dashboard\/billing/],
   [403, /refused the request \(HTTP 403\)/],
-  [404, /does not recognise model “jev-1.13-free” \(HTTP 404\)/],
+  [404, /does not recognise model “jev-1.14-free” \(HTTP 404\)/],
   [400, /rejected the request \(HTTP 400\) \(questions\.target_element_id\.criteria is empty\)/],
   [422, /rejected the request \(HTTP 422\)/],
 ]) {
@@ -406,7 +415,10 @@ test("none_applicable twice in a row ends gracefully", async () => {
 });
 
 test("stops at the 15-step limit", async () => {
-  const bg = loadBackground({ respond: (r) => answerFor(r, { target: findElement(r, /Cabin|select/i), action: "click" }) });
+  const bg = loadBackground({
+    respond: (r) =>
+      answerFor(r, { target: findElement(r, r.state.step % 2 ? /Cabin|select/i : /^INPUT - Depart/), action: "click" }),
+  });
   await bg.start();
   const state = await bg.idle();
   assert.equal(bg.calls.length, 15);
@@ -565,4 +577,45 @@ test("the API key never appears in logs or broadcast state", async () => {
   await bg.idle();
   const everything = JSON.stringify(bg.broadcasts) + JSON.stringify(await bg.status());
   assert.ok(!everything.includes("sk-super-secret-123"));
+});
+
+test("SUBMIT presses Enter in a field and the form is submitted", async () => {
+  const bg = loadBackground({
+    respond: flightScript({
+      3: (r) => ({ target: findElement(r, DESTINATION), action: "submit", confidence: 0.95 }),
+    }),
+  });
+  await bg.start();
+  const state = await bg.idle();
+  assert.equal(state.finished, true, JSON.stringify(logTexts(state)));
+  assert.equal(bg.page.document.getElementById("results").hidden, false);
+  assert.ok(logTexts(state).some((t) => t.startsWith("Pressed Enter in")));
+});
+
+test("the same step chosen 3 times in a row stops the run instead of looping", async () => {
+  const bg = loadBackground({ respond: (r) => answerFor(r, { target: findElement(r, /Cabin|select/i), action: "click" }) });
+  await bg.start();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 3);
+  assert.equal(state.finished, true);
+  assert.match(logTexts(state).at(-1), /same step .* 3 times in a row/);
+  assert.equal(bg.page.document.querySelectorAll("[data-jev-id]").length, 0);
+});
+
+test("a localhost test endpoint replaces the provider URL; remote overrides are refused", async () => {
+  const bg = loadBackground({ respond: flightScript() });
+  let state = await bg.start({ endpoint: "https://evil.example.com/v1/systemone" });
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /must be on localhost/);
+  state = await bg.start({ endpoint: "not a url" });
+  assert.match(state.lastError, /not a valid URL/);
+  assert.equal(bg.calls.length, 0);
+
+  state = await bg.start({ endpoint: "http://127.0.0.1:41786/v1/systemone" });
+  assert.equal(state.localEndpoint, true);
+  state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.equal(bg.calls[0].url, "http://127.0.0.1:41786/v1/systemone");
+  assert.equal(bg.calls[0].request.model, "jev-1.14-free");
+  assert.ok(logTexts(state).some((t) => t.includes("local test endpoint")));
 });

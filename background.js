@@ -10,8 +10,8 @@ const PROVIDERS = {
     id: "beatapi",
     name: "BeatAPI",
     endpoint: "https://api.beatapi.io/v1/systemone",
-    model: "jev-1.13-free",
-    rateNote: "Free BeatAPI keys allow 1 successful request per minute until you top up.",
+    model: "jev-1.14-free",
+    rateNote: "Free BeatAPI calls are limited to 1 successful request per minute before your first top-up, and 10 per minute after.",
     defaultRetrySeconds: 60,
   },
   typesafe: {
@@ -35,7 +35,10 @@ const MAX_SERVER_RETRIES = 2;
 const MAX_HTTP_5XX_RETRIES = 1;
 const KEEPALIVE_INTERVAL_MS = 20000;
 const EXTRACT_ATTEMPTS = 3;
-const ACTION_TYPES = ["click", "type", "finish"];
+const MAX_REPEATS = 3;
+const HISTORY_LIMIT = 10;
+const ACTION_TYPES = ["click", "type", "submit", "finish"];
+const LOCAL_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 const RESTRICTED_PREFIXES = [
   "chrome://",
   "chrome-extension://",
@@ -75,7 +78,11 @@ const session = {
   goal: "",
   apiKey: "",
   provider: PROVIDERS.beatapi,
+  endpoint: PROVIDERS.beatapi.endpoint,
   resolvedModel: "",
+  history: [],
+  lastSignature: "",
+  repeatCount: 0,
   logs: [],
   pendingConfirmation: null,
   pendingAction: null,
@@ -120,7 +127,7 @@ async function handleMessage(message, sender) {
     return publicState();
   }
   if (type === "START") {
-    await startRun(message.apiKey, message.goal, message.provider, sender && sender.tab);
+    await startRun(message.apiKey, message.goal, message.provider, sender && sender.tab, message.endpoint);
     return publicState();
   }
   if (type === "CONFIRM") {
@@ -134,16 +141,18 @@ async function handleMessage(message, sender) {
   return publicState();
 }
 
-async function startRun(apiKey, goal, providerId, senderTab) {
+async function startRun(apiKey, goal, providerId, senderTab, endpointOverride) {
   const key = String(apiKey || "").trim();
   const userGoal = String(goal || "").trim();
   const provider = PROVIDERS[providerId] || PROVIDERS.beatapi;
+  const endpoint = resolveEndpoint(provider, endpointOverride);
   if (!key) throw new Error("Add your " + provider.name + " API key in Settings first.");
   if (!userGoal) throw new Error("Describe what Jev should do first.");
   if (session.running) throw new Error("A task is already running. Stop it before starting another.");
 
   const tab = await resolveTargetTab(senderTab);
-  const sameProvider = session.provider && session.provider.id === provider.id && session.apiKey === key;
+  const sameProvider =
+    session.provider && session.provider.id === provider.id && session.apiKey === key && session.endpoint === endpoint;
   session.generation += 1;
   session.running = true;
   session.paused = false;
@@ -156,7 +165,11 @@ async function startRun(apiKey, goal, providerId, senderTab) {
   session.goal = userGoal;
   session.apiKey = key;
   session.provider = provider;
+  session.endpoint = endpoint;
   session.resolvedModel = "";
+  session.history = [];
+  session.lastSignature = "";
+  session.repeatCount = 0;
   session.logs = [];
   session.pendingConfirmation = null;
   session.pendingAction = null;
@@ -182,10 +195,26 @@ async function startRun(apiKey, goal, providerId, senderTab) {
       " steps.",
     { kind: "start" }
   );
-  if (provider.rateNote) log("info", provider.rateNote);
+  if (endpoint !== provider.endpoint) log("info", "Using local test endpoint " + endpoint + " instead of " + provider.name + ".");
+  else if (provider.rateNote) log("info", provider.rateNote);
   broadcast();
   const generation = session.generation;
   queueMicrotask(() => runLoop(generation));
+}
+
+function resolveEndpoint(provider, override) {
+  const raw = String(override || "").trim();
+  if (!raw) return provider.endpoint;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("The local test endpoint is not a valid URL.");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || !LOCAL_HOSTS.includes(url.hostname)) {
+    throw new Error("The local test endpoint must be on localhost or 127.0.0.1.");
+  }
+  return url.href;
 }
 
 function stopRun(reason) {
@@ -211,6 +240,7 @@ function finishRun(reason) {
   session.waitReason = "";
   log("done", reason || "Finished.", { kind: "finish" });
   broadcast();
+  if (session.tabId) sendToTab(session.tabId, { type: "CLEAR_MARKERS" }).catch(() => {});
 }
 
 function failRun(err) {
@@ -280,6 +310,8 @@ async function runOneStep(generation) {
     candidates,
     lastResult: session.lastResult,
     step: session.step,
+    pageText: typeof snapshot.pageText === "string" ? snapshot.pageText : "",
+    history: session.history,
   });
 
   const { payload: jev, latencyMs } = await callJev(session.apiKey, body, generation);
@@ -326,6 +358,16 @@ async function runOneStep(generation) {
   }
 
   session.noneStreak = 0;
+
+  const signature = [actionType, targetId, textValue].join("|");
+  session.repeatCount = signature === session.lastSignature ? session.repeatCount + 1 : 1;
+  session.lastSignature = signature;
+  if (session.repeatCount >= MAX_REPEATS) {
+    finishRun(
+      "Stopped: Jev chose the same step (" + actionLabel + " “" + clip(targetLabel, 60) + "”) " + MAX_REPEATS + " times in a row without progress."
+    );
+    return false;
+  }
 
   const base = {
     targetId,
@@ -534,7 +576,10 @@ async function dispatchAction(tabId, targetId, actionType, textValue, targetLabe
     throw new Error((result && result.error) || "The page did not accept the action.");
   }
   const label = targetLabel || targetId;
-  if (actionType === "type" && textValue && !result.coerced) {
+  if (actionType === "submit") {
+    session.lastResult = "Pressed Enter in " + targetId;
+    log("system", "Pressed Enter in “" + clip(label, 60) + "”.", { kind: "result" });
+  } else if (actionType === "type" && textValue && !result.coerced) {
     session.lastResult = "Typed into " + targetId + ": " + clip(textValue, 80);
     log("system", "Typed “" + clip(textValue, 80) + "” into " + clip(label, 60) + ".", { kind: "result" });
   } else if (result.coerced === "click") {
@@ -546,15 +591,26 @@ async function dispatchAction(tabId, targetId, actionType, textValue, targetLabe
     session.lastResult = "Clicked " + targetId;
     log("system", "Clicked “" + clip(label, 60) + "”.", { kind: "result" });
   }
+  session.history.push({ step: session.step, result: session.lastResult, target_label: clip(label, 60) });
+  if (session.history.length > HISTORY_LIMIT) session.history = session.history.slice(-HISTORY_LIMIT);
   broadcast();
   await sleep(DOM_SETTLE_MS, generation);
   await waitForTabReady(tabId);
 }
 
-function buildJevRequest({ goal, currentUrl, pageTitle, elements, candidates, lastResult, step }) {
+function describeCriterion(el) {
+  let text = el.tag + " - " + el.label + " (" + el.type + ")";
+  if (typeof el.value === "string") text += el.value ? " · current value: “" + el.value + "”" : " · empty";
+  if (el.checked === true) text += " · checked";
+  if (el.checked === false) text += " · not checked";
+  if (el.disabled) text += " · disabled";
+  return text;
+}
+
+function buildJevRequest({ goal, currentUrl, pageTitle, elements, candidates, lastResult, step, pageText, history }) {
   const criteria = {};
   for (const el of elements) {
-    criteria[el.id] = el.tag + " - " + el.label + " (" + el.type + ")";
+    criteria[el.id] = describeCriterion(el);
   }
   criteria.none_applicable = "No visible element matches the goal";
 
@@ -562,15 +618,17 @@ function buildJevRequest({ goal, currentUrl, pageTitle, elements, candidates, la
     target_element_id: {
       type: "choice",
       instructions:
-        "Which element ID should be acted on next to fulfill the user goal? Pick none_applicable if nothing on this page is the right next control.",
+        "Which element ID should be acted on next to fulfill the user goal? Skip fields whose current value already matches the goal and steps listed in completed_actions. Pick none_applicable if nothing on this page is the right next control.",
       criteria,
     },
     action_type: {
       type: "choice",
-      instructions: "What action should be taken on this element?",
+      instructions:
+        "What should happen next? Choose finish only when page_text or the completed actions show the user goal is achieved.",
       criteria: {
         click: "Click the element",
         type: "Input text into a field",
+        submit: "Press Enter in a filled text field to submit it, when there is no separate button to click",
         finish: "Goal is completely achieved",
       },
     },
@@ -605,6 +663,8 @@ function buildJevRequest({ goal, currentUrl, pageTitle, elements, candidates, la
       step,
       max_steps: MAX_STEPS,
       last_result: lastResult || "",
+      completed_actions: (history || []).map((h) => "Step " + h.step + ": " + h.result),
+      page_text: pageText || "",
       interactive_elements: elements,
     },
     questions,
@@ -625,7 +685,7 @@ async function callJev(apiKey, body, generation) {
     session.lastRequestAt = Date.now();
     let response;
     try {
-      response = await fetch(provider.endpoint, {
+      response = await fetch(session.endpoint || provider.endpoint, {
         method: "POST",
         headers: {
           Authorization: "Bearer " + apiKey,
@@ -818,7 +878,7 @@ function extractTextCandidates(goal) {
   }
 
   const parts = String(goal || "").split(
-    /\b(?:from|to|for|in|at|near|via|search(?:\s+for)?|flights?|type|enter|find|open|go to|and|then|with)\b/i
+    /\b(?:from|to|for|in|at|on|into|near|via|named|called|search(?:\s+for)?|flights?|type|enter|find|open|go to|and|then|with)\b/i
   );
   for (const part of parts) add(part.replace(/["“”‘’]/g, ""));
 
@@ -947,6 +1007,8 @@ function publicState() {
     provider: session.provider ? session.provider.id : "",
     providerName: session.provider ? session.provider.name : "",
     model: session.resolvedModel || (session.provider ? session.provider.model : ""),
+    endpoint: session.endpoint,
+    localEndpoint: Boolean(session.provider && session.endpoint && session.endpoint !== session.provider.endpoint),
     tabId: session.tabId,
     tabTitle: session.tabTitle,
     tabUrl: session.tabUrl,

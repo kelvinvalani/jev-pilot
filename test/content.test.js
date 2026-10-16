@@ -169,3 +169,47 @@ test("content.js is idempotent when injected twice", async () => {
   const res = await extract(page);
   assert.ok(res.elements.length > 0);
 });
+
+test("EXTRACT reports field values, checked/disabled state, options and visible page text", async () => {
+  const page = createPage({
+    html: `<!doctype html><title>t</title><main>
+      <h1>Account</h1><p>Signed out. Fill the form.</p>
+      <input aria-label="Email" value="kim@example.test" />
+      <input aria-label="Password" type="password" value="hunter2" />
+      <label><input type="checkbox" checked /> Remember me</label>
+      <select aria-label="Plan"><option>Free</option><option selected>Pro</option></select>
+      <button disabled>Delete</button>
+    </main>`,
+    inject: ["content.js"],
+  });
+  const res = await extract(page);
+  const by = (re) => res.elements.find((e) => re.test(e.label));
+  assert.equal(by(/^Email/).value, "kim@example.test");
+  assert.equal(by(/^Password/).value, "(filled)");
+  assert.ok(!JSON.stringify(res).includes("hunter2"), "password values never leave the page");
+  assert.equal(by(/Remember me/).checked, true);
+  assert.equal(by(/^Plan/).value, "Pro");
+  assert.deepEqual(Array.from(by(/^Plan/).options), ["Free", "Pro"]);
+  assert.equal(by(/Delete/).disabled, true);
+  assert.match(res.pageText, /Account Signed out\. Fill the form\./);
+});
+
+test("SUBMIT presses Enter and submits the enclosing form once", async () => {
+  const page = createPage({
+    html: `<!doctype html><title>t</title><form id="f"><input aria-label="Search" /></form>`,
+    inject: ["content.js"],
+  });
+  const keys = [];
+  let submits = 0;
+  const input = page.document.querySelector("input");
+  input.addEventListener("keydown", (e) => keys.push(e.key));
+  page.document.getElementById("f").addEventListener("submit", (e) => {
+    e.preventDefault();
+    submits += 1;
+  });
+  const id = (await extract(page)).elements[0].id;
+  const out = await page.deliver({ type: "EXECUTE", targetId: id, actionType: "submit" });
+  assert.equal(out.ok, true);
+  assert.deepEqual(keys, ["Enter"]);
+  assert.equal(submits, 1);
+});

@@ -19,7 +19,7 @@ function baseState(extra) {
     goal: "",
     provider: "beatapi",
     providerName: "BeatAPI",
-    model: "jev-1.13-free",
+    model: "jev-1.14-free",
     tabTitle: "Northwind Flights",
     tabUrl: "https://flights.example.test/",
     waitingUntil: 0,
