@@ -6,7 +6,7 @@ Jev is a single-pass decision model (`Choice` and `Noul`) with typical latency w
 
 You can use either:
 
-- **BeatAPI** (default) — a [BeatAPI](https://beatapi.io/jev-api) key with model `jev-1.13-free` at `https://api.beatapi.io/v1/systemone`. Same Jev 1.13 contract. Works with a zero balance. Free accounts are limited to **one successful request per minute** until you top up.
+- **BeatAPI** (default) — a [BeatAPI](https://beatapi.io/jev-api) key with model `jev-1.14-free` at `https://api.beatapi.io/v1/systemone`. Free to call, even with a zero balance. Rate limit: **one successful request per minute** until your first top-up, ten per minute after.
 - **TypeSafe** — a [TypeSafe console](https://console.typesafe.ai/settings/keys) key with `jev-latest` at `https://api.typesafe.ai/v1/systemone`.
 
 The keys are not interchangeable. A BeatAPI key sent to TypeSafe (or the reverse) returns HTTP 401.
@@ -31,7 +31,7 @@ The overlay floats above the page, so you can watch Jev work. Close it with the 
 
 Each step appears in **Activity** with the action, the element, Jev’s confidence, and latency. **Copy** exports the full log.
 
-The loop stops when Jev chooses `finish`, after 15 steps, or when you click **Stop**. If target-element confidence is below **0.60**, the loop pauses and asks you to run the step, skip it, or stop.
+The loop stops when Jev chooses `finish`, after 15 steps, when Jev picks the same step three times in a row, or when you click **Stop**. If target-element confidence is below **0.60**, the loop pauses and asks you to run the step, skip it, or stop.
 
 ### Errors and retries
 
@@ -50,11 +50,12 @@ Stopping cancels any wait or in-flight request, and late responses are discarded
 
 ## How a step works
 
-1. `content.js` tags visible `button`, `a`, `input`, `select`, `[role="button"]`, and `[onclick]` nodes with `data-jev-id="elem_N"`
-2. `background.js` POSTs that snapshot to Jev as `state` plus three parallel questions:
-   - `target_element_id` (`choice`, always includes `none_applicable`)
-   - `action_type` (`choice`: `click` / `type` / `finish`)
+1. `content.js` tags visible `button`, `a`, `input`, `select`, `[role="button"]`, and `[onclick]` nodes with `data-jev-id="elem_N"`, and records each control's current value, checked and disabled state (password values are never sent, only `(filled)`)
+2. `background.js` POSTs that snapshot to Jev as `state` — including `page_text` (visible text of the page, up to 1,500 characters) and `completed_actions` (the last 10 steps) — plus these questions:
+   - `target_element_id` (`choice`, always includes `none_applicable`; each option shows the control's current value)
+   - `action_type` (`choice`: `click` / `type` / `submit` (press Enter) / `finish`)
    - `requires_complex_text` (`noul`)
+   - `text_candidate` (`choice`, only when the goal contains values to type)
 3. Typed fields are read directly (`answers.target_element_id.choice`, `.confidence`) — no regex
 4. Clicks dispatch `pointerdown` / `mousedown` / `pointerup` / `mouseup` / `click` once. Typing uses the native `value` setter so React, Vue, and Angular see the change
 5. After 300ms (and any navigation), the loop extracts the DOM again
@@ -71,6 +72,7 @@ Jev cannot generate free-form copy. Values to type are chosen from short fragmen
 | `content.js` | DOM extract + native event dispatch (never targets Jev’s own UI) |
 | `background.js` | Jev control loop, validation, retries, rate-limit pacing |
 | `demo-page.html` | Local flight-search page for a dry run |
+| `scripts/mock-jev.js` | Local mock Jev API for free, repeatable runs (`npm run mock-jev`) |
 | `test/` | Mocked unit + integration tests (no API key or network needed) |
 
 ## Tests
@@ -82,6 +84,18 @@ npm run check   # JS syntax + manifest validation
 ```
 
 `test/fixtures/jev.js` builds typed System One responses (`choice` with `confidence` and `probabilities`, `noul` probabilities). The integration tests run `background.js` against the real `content.js` on `demo-page.html` with a mocked `fetch` and a virtual clock, covering the full flow, confirmations, 429/5xx/timeouts, auth and billing errors, malformed answers, Stop/cancel races, and restricted pages — without spending any tokens.
+
+`test/mock-jev.test.js` also runs the extension against `scripts/mock-jev.js` over real HTTP. The mock checks each request against the documented contract (Bearer auth, `{ model, state, questions }`, typed `choice`/`noul` questions) and returns the documented error envelopes.
+
+## Run the real extension without spending credits
+
+```bash
+npm run mock-jev                         # http://127.0.0.1:41786/v1/systemone
+npm run mock-jev -- --scenario review    # low-confidence click → review card
+npm run mock-jev -- --scenario rate-limit  # first call returns 429 + Retry-After: 3
+```
+
+In **Settings → Local test endpoint**, enter `http://127.0.0.1:41786/v1/systemone`. Any non-empty key works. Only `localhost`/`127.0.0.1` endpoints are accepted. The mock follows simple rules (type each value from the goal into the matching empty field, click the button that best matches the goal, then finish), so it is for checking the extension's wiring, not Jev's reasoning. Clear the field to go back to the real provider.
 
 ## Local UI preview
 

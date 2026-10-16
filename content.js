@@ -22,6 +22,8 @@
 
   const MAX_ELEMENTS = 80;
   const LABEL_MAX = 96;
+  const VALUE_MAX = 80;
+  const PAGE_TEXT_MAX = 1500;
 
   /** @type {Map<string, Element>} */
   let elementMap = new Map();
@@ -39,6 +41,7 @@
           elements: extractInteractiveElements(),
           url: location.href,
           title: document.title || "",
+          pageText: visiblePageText(),
         });
         return;
       }
@@ -100,6 +103,7 @@
         tag: el.tagName,
         label: describeElement(el),
         type: elementType(el),
+        ...elementState(el),
       });
     }
     return result;
@@ -131,6 +135,8 @@
           detail: "Element is not typable; dispatched click instead.",
         };
       }
+    } else if (type === "submit") {
+      result = pressEnter(el);
     } else {
       clickElement(el);
       result = { ok: true, detail: "Clicked " + targetId };
@@ -160,6 +166,93 @@
     el.dispatchEvent(new MouseEvent("pointerup", opts));
     el.dispatchEvent(new MouseEvent("mouseup", opts));
     el.dispatchEvent(new MouseEvent("click", opts));
+  }
+
+  function pressEnter(el) {
+    try {
+      el.focus({ preventScroll: true });
+    } catch {
+      // ignore
+    }
+    const opts = { bubbles: true, cancelable: true, composed: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 };
+    const down = new KeyboardEvent("keydown", opts);
+    const proceed = el.dispatchEvent(down);
+    el.dispatchEvent(new KeyboardEvent("keypress", opts));
+    el.dispatchEvent(new KeyboardEvent("keyup", opts));
+    const form = el.form || el.closest("form");
+    if (proceed && form && !(el instanceof HTMLTextAreaElement)) {
+      if (typeof form.requestSubmit === "function") form.requestSubmit();
+      else form.submit();
+      return { ok: true, detail: "Pressed Enter and submitted the form" };
+    }
+    return { ok: true, detail: "Pressed Enter" };
+  }
+
+  function elementState(el) {
+    const state = {};
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") state.disabled = true;
+    if (el instanceof HTMLInputElement) {
+      const type = (el.type || "text").toLowerCase();
+      if (type === "checkbox" || type === "radio") {
+        state.checked = el.checked;
+        return state;
+      }
+      if (type === "password") {
+        if (el.value) state.value = "(filled)";
+        return state;
+      }
+      if (["button", "submit", "reset", "image", "file"].includes(type)) return state;
+      state.value = clip(String(el.value || "").replace(/\s+/g, " ").trim(), VALUE_MAX);
+      return state;
+    }
+    if (el instanceof HTMLTextAreaElement) {
+      state.value = clip(String(el.value || "").replace(/\s+/g, " ").trim(), VALUE_MAX);
+      return state;
+    }
+    if (el instanceof HTMLSelectElement) {
+      const opt = el.selectedOptions && el.selectedOptions[0];
+      state.value = clip(String((opt && opt.textContent) || el.value || "").trim(), VALUE_MAX);
+      state.options = Array.from(el.options)
+        .slice(0, 20)
+        .map((o) => clip(String(o.textContent || o.value).trim(), 40))
+        .filter(Boolean);
+      return state;
+    }
+    if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+      state.value = clip(String(el.textContent || "").replace(/\s+/g, " ").trim(), VALUE_MAX);
+    }
+    const pressed = el.getAttribute("aria-pressed") || el.getAttribute("aria-checked");
+    if (pressed === "true" || pressed === "false") state.checked = pressed === "true";
+    return state;
+  }
+
+  function visiblePageText() {
+    const root = document.querySelector("main, [role='main']") || document.body;
+    if (!root) return "";
+    const parts = [];
+    let length = 0;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const hiddenCache = new Map();
+    for (let node = walker.nextNode(); node && length < PAGE_TEXT_MAX; node = walker.nextNode()) {
+      const text = node.nodeValue.replace(/\s+/g, " ").trim();
+      const parent = node.parentElement;
+      if (!text || !parent || parent.closest("script, style, noscript, template")) continue;
+      if (!hiddenCache.has(parent)) hiddenCache.set(parent, isTextHidden(parent));
+      if (hiddenCache.get(parent)) continue;
+      parts.push(text);
+      length += text.length + 1;
+    }
+    return clip(parts.join(" "), PAGE_TEXT_MAX);
+  }
+
+  function isTextHidden(el) {
+    if (typeof el.checkVisibility === "function") return !el.checkVisibility({ checkVisibilityCSS: true });
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (node.hidden || node.getAttribute("aria-hidden") === "true") return true;
+      const style = window.getComputedStyle(node);
+      if (style && (style.display === "none" || style.visibility === "hidden")) return true;
+    }
+    return false;
   }
 
   function typeInto(el, textValue) {
@@ -335,7 +428,7 @@
     pushUnique(bits, el.getAttribute("alt"));
     pushUnique(bits, el.getAttribute("name"));
     pushUnique(bits, innerLabel(el));
-    pushUnique(bits, el.getAttribute("value"));
+    if (!(el instanceof HTMLInputElement && el.type === "password")) pushUnique(bits, el.getAttribute("value"));
     const href = el instanceof HTMLAnchorElement ? el.getAttribute("href") : "";
     if (href && href !== "#") pushUnique(bits, href.slice(0, 60));
     const joined = bits.filter(Boolean).join(" · ").replace(/\s+/g, " ").trim();
