@@ -44,6 +44,17 @@ test("Run sends START with the trimmed goal, key and provider", async () => {
   });
 });
 
+test("a saved local test endpoint is sent with START and shown in the run meta", async () => {
+  const p = loadPopup({ storage: { ...KEY, jevTestEndpoint: "http://127.0.0.1:41786/v1/systemone" } });
+  await p.settle();
+  assert.equal(p.$("testEndpoint").value, "http://127.0.0.1:41786/v1/systemone");
+  p.type("goal", "Click sign in");
+  p.$("taskForm").requestSubmit();
+  await p.settle();
+  const start = p.sent.find((m) => m.type === "START");
+  assert.equal(start.endpoint, "http://127.0.0.1:41786/v1/systemone");
+});
+
 test("Run with an empty goal shows an inline error and sends nothing", async () => {
   const p = loadPopup({ storage: KEY });
   await p.settle();

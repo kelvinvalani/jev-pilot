@@ -21,6 +21,7 @@ const STORAGE_KEYS = {
   provider: "jevProvider",
   goal: "lastGoal",
   showLauncher: "showLauncher",
+  testEndpoint: "jevTestEndpoint",
 };
 
 const PROVIDERS = {
@@ -62,6 +63,7 @@ const els = {
   providerInputs: Array.from(document.querySelectorAll('input[name="provider"]')),
   keyLabel: $("keyLabel"),
   apiKey: $("apiKey"),
+  testEndpoint: $("testEndpoint"),
   toggleKey: $("toggleKey"),
   keySaved: $("keySaved"),
   keyLink: $("keyLink"),
@@ -172,6 +174,7 @@ function persistSettings(options) {
     [STORAGE_KEYS.provider]: selectedProvider(),
     [STORAGE_KEYS.goal]: els.goal.value,
     [STORAGE_KEYS.showLauncher]: els.showLauncher.checked,
+    [STORAGE_KEYS.testEndpoint]: els.testEndpoint.value.trim(),
   };
   runtime().storage.sync.set(payload, () => {
     if (!opts.flashSaved) return;
@@ -198,6 +201,7 @@ function loadSettings() {
       }
       if (data[STORAGE_KEYS.goal]) els.goal.value = data[STORAGE_KEYS.goal];
       els.showLauncher.checked = data[STORAGE_KEYS.showLauncher] !== false;
+      if (data[STORAGE_KEYS.testEndpoint]) els.testEndpoint.value = data[STORAGE_KEYS.testEndpoint];
       applyProviderUi();
       updateGoalCount();
       resolve();
@@ -254,6 +258,7 @@ function render() {
   els.goal.disabled = running || ui.busy;
   els.startBtn.disabled = running || ui.busy;
   els.apiKey.disabled = running;
+  els.testEndpoint.disabled = running;
   for (const input of els.providerInputs) input.disabled = running;
   els.formError.hidden = !ui.localError;
   els.formError.textContent = ui.localError;
@@ -278,6 +283,7 @@ function renderRun(state, running) {
   els.progressBar.style.width = Math.round((step / max) * 100) + "%";
   const bits = ["Step " + step + " of " + max];
   if (state.providerName) bits.push(state.providerName + (state.model ? " · " + state.model : ""));
+  if (state.localEndpoint) bits.push("local test endpoint");
   els.runMeta.textContent = bits.join(" · ");
   renderWait(state);
 }
@@ -560,6 +566,8 @@ els.apiKey.addEventListener("input", () => {
   schedulePersist(true);
 });
 
+els.testEndpoint.addEventListener("input", () => schedulePersist(true));
+
 els.toggleKey.addEventListener("click", () => {
   const reveal = els.apiKey.type === "password";
   els.apiKey.type = reveal ? "text" : "password";
@@ -608,7 +616,8 @@ els.taskForm.addEventListener("submit", async (event) => {
   }
   ui.localError = "";
   persistSettings();
-  await command({ type: "START", apiKey, goal, provider: selectedProvider() });
+  const endpoint = els.testEndpoint.value.trim();
+  await command({ type: "START", apiKey, goal, provider: selectedProvider(), ...(endpoint ? { endpoint } : {}) });
 });
 
 els.stopBtn.addEventListener("click", () => command({ type: "STOP" }));
@@ -682,7 +691,7 @@ function createMockChrome() {
       goal: "",
       provider: "beatapi",
       providerName: "BeatAPI",
-      model: "jev-1.13-free",
+      model: "jev-1.14-free",
       tabTitle: "Demo page",
       tabUrl: "",
       waitingUntil: 0,
