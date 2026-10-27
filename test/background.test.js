@@ -284,3 +284,344 @@ test("status is broadcast to the popup and the page launcher", async () => {
   assert.ok(bg.broadcasts.some((m) => m.type === "STATE" && m.state.finished));
   assert.ok(bg.tabMessages.some((m) => m.type === "JEV_FAST_STATUS" && m.status.running));
 });
+
+const TWO_FIELD_FORM = `<!doctype html><title>Signup</title>
+  <form id="signup">
+    <label for="first">First name</label>
+    <input id="first" name="first" type="text" />
+    <label for="nickname">Nickname</label>
+    <input id="nickname" name="nickname" type="text" />
+  </form>`;
+
+function answersForFields(request, decisions) {
+  const answers = {};
+  for (const [pattern, decision] of decisions) {
+    const fieldId = findField(request, pattern);
+    const option =
+      decision.option === "none"
+        ? "none"
+        : decision.option || findOption(request, decision.optionPattern || /legal first name.*default/i);
+    answers[fieldId] = {
+      type: "choice",
+      choice: option,
+      confidence: decision.confidence == null ? 0.95 : decision.confidence,
+      probabilities: { [option]: decision.confidence == null ? 0.95 : decision.confidence },
+    };
+  }
+  for (const id of Object.keys(request.questions)) {
+    if (!answers[id]) {
+      answers[id] = { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } };
+    }
+  }
+  return {
+    id: "sys1_mock_multi",
+    object: "systemone.response",
+    model: request.model,
+    created: 1790000100,
+    answers,
+    usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+    latency_ms: 40,
+  };
+}
+
+test("a low-confidence choice opens a check after confident writes, in page order", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      const firstOpt = findOption(request, /legal first name.*default/i);
+      return {
+        id: "sys1_mock_order",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000200,
+        answers: {
+          [first]: { type: "choice", choice: firstOpt, confidence: 0.95, probabilities: { [firstOpt]: 0.95 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  const state = await bg.idle();
+
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("nickname").value, "");
+  assert.equal(state.running, true);
+  assert.ok(state.check);
+  assert.equal(state.check.wording, "Nickname");
+  assert.equal(state.check.proposedSlotName, "Nickname");
+  assert.ok(Array.isArray(state.check.slots));
+  assert.ok(state.check.slots.some((s) => s.name === "legal first name"));
+  const blob = JSON.stringify(state);
+  assert.ok(!blob.includes("sk-mock"), "API key must stay out of status");
+});
+
+test("saving a check settles the slot and answer, then writes the field", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      const firstOpt = findOption(request, /legal first name.*default/i);
+      return {
+        id: "sys1_mock_save",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000300,
+        answers: {
+          [first]: { type: "choice", choice: firstOpt, confidence: 0.95, probabilities: { [firstOpt]: 0.95 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  assert.equal((await bg.status()).check.wording, "Nickname");
+
+  await bg.send({
+    type: "RESOLVE_CHECK",
+    slotId: "slot_legal_first_name",
+    answer: "Ace",
+  });
+  const state = await bg.idle();
+  assert.equal(state.check, null);
+  assert.equal(state.finished, true);
+  assert.equal(bg.page.document.getElementById("nickname").value, "Ace");
+  const slot = bg.storage.jevProfile.slots.find((s) => s.id === "slot_legal_first_name");
+  assert.ok(slot.aliases.map((a) => a.toLowerCase()).includes("nickname"));
+  const answer = bg.storage.jevProfile.answers.find(
+    (a) => a.slotId === "slot_legal_first_name" && a.situationId === null
+  );
+  assert.equal(answer.value, "Ace");
+});
+
+test("minting uses the field wording as the slot name and first alias", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM.replace("First name", "Loyalty number").replace('id="first"', 'id="loyalty"').replace('for="first"', 'for="loyalty"'),
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /Loyalty number/);
+      return {
+        id: "sys1_mock_mint",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000400,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  const check = (await bg.status()).check;
+  assert.equal(check.wording, "Loyalty number");
+  assert.equal(check.proposedSlotName, "Loyalty number");
+
+  await bg.send({ type: "RESOLVE_CHECK", mintName: "Loyalty number", answer: "L-42" });
+  await bg.idle();
+
+  assert.equal(bg.page.document.getElementById("loyalty").value, "L-42");
+  const minted = bg.storage.jevProfile.slots.find((s) => s.name === "Loyalty number");
+  assert.ok(minted, "minted slot exists");
+  assert.ok(minted.aliases.includes("Loyalty number"));
+  const answer = bg.storage.jevProfile.answers.find((a) => a.slotId === minted.id && a.situationId === null);
+  assert.equal(answer.value, "L-42");
+});
+
+test("the person can edit the minted slot name before save", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM.replace("First name", "Loyalty number").replace('id="first"', 'id="loyalty"').replace('for="first"', 'for="loyalty"'),
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /Loyalty number/);
+      return {
+        id: "sys1_mock_mint_edit",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000410,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  await bg.send({ type: "RESOLVE_CHECK", mintName: "shop loyalty id", answer: "L-99" });
+  await bg.idle();
+
+  const minted = bg.storage.jevProfile.slots.find((s) => s.name === "shop loyalty id");
+  assert.ok(minted);
+  assert.ok(minted.aliases.includes("Loyalty number"));
+  assert.equal(bg.page.document.getElementById("loyalty").value, "L-99");
+});
+
+test("skip leaves the field blank, stores nothing, and opens the next check", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      return {
+        id: "sys1_mock_skip",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000500,
+        answers: {
+          [first]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  let state = await bg.idle();
+  assert.equal(state.check.wording, "First name");
+
+  await bg.send({ type: "SKIP" });
+  state = await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.equal(state.check.wording, "Nickname");
+  assert.equal(bg.storage.jevProfile.answers.length, 1, "skip stores nothing new");
+});
+
+test("a skipped field is asked again on a later fill", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /First name/);
+      return {
+        id: "sys1_mock_skip_later",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000600,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  await bg.send({ type: "SKIP" });
+  await bg.idle();
+  assert.equal((await bg.status()).finished, true);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  const callsAfterSkip = bg.calls.length;
+
+  await bg.fill();
+  const state = await bg.idle();
+  assert.ok(state.check);
+  assert.equal(state.check.wording, "First name");
+  assert.equal(bg.calls.length, callsAfterSkip + 1);
+});
+
+test("stop ends remaining checks while keeping writes already made", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      const firstOpt = findOption(request, /legal first name.*default/i);
+      return {
+        id: "sys1_mock_stop",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000700,
+        answers: {
+          [first]: { type: "choice", choice: firstOpt, confidence: 0.95, probabilities: { [firstOpt]: 0.95 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.ok((await bg.status()).check);
+
+  await bg.send({ type: "STOP" });
+  const state = await bg.status();
+  assert.equal(state.running, false);
+  assert.equal(state.check, null);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("nickname").value, "");
+});
+
+test("a choice below 0.85 opens a check even when a slot was picked", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /First name/);
+      const option = findOption(request, /legal first name.*default/i);
+      return answerFor(request, { fieldId, option, confidence: 0.84 });
+    },
+  });
+
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.ok(state.check);
+  assert.equal(state.check.wording, "First name");
+  assert.equal(state.check.preSelectedSlotId, "slot_legal_first_name");
+});
+
+test("a second fill is refused while one is in progress", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /First name/);
+      return {
+        id: "sys1_mock_busy",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000800,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  assert.ok((await bg.status()).check);
+
+  const state = await bg.fill();
+  assert.match(state.lastError, /already in progress/i);
+  assert.ok((await bg.status()).check, "original check remains");
+});

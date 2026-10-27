@@ -121,6 +121,40 @@
             <p id="waitNotice" class="wait-notice" hidden></p>
           </div>
 
+          <section id="checkCard" class="card review-card" role="group" aria-labelledby="checkTitle" hidden>
+            <h3 id="checkTitle">Check this field</h3>
+            <p id="checkWording" class="review-text"></p>
+            <p id="checkHeading" class="muted small" hidden></p>
+
+            <div class="field">
+              <div class="field-head">
+                <label for="checkSlot">Slot</label>
+              </div>
+              <select id="checkSlot"></select>
+            </div>
+
+            <div id="checkMintRow" class="field" hidden>
+              <div class="field-head">
+                <label for="checkMintName">New slot name</label>
+              </div>
+              <input id="checkMintName" type="text" autocomplete="off" spellcheck="false" />
+              <p class="help">The field wording stays as the first alias.</p>
+            </div>
+
+            <div class="field">
+              <div class="field-head">
+                <label for="checkAnswer">Answer</label>
+              </div>
+              <input id="checkAnswer" type="text" autocomplete="off" spellcheck="false" placeholder="Type the answer to write" />
+            </div>
+
+            <div class="button-row">
+              <button id="checkSaveBtn" class="btn btn-primary" type="button">Save</button>
+              <button id="checkSkipBtn" class="btn btn-secondary" type="button">Skip</button>
+              <button id="checkStopBtn" class="btn btn-ghost" type="button">Stop</button>
+            </div>
+          </section>
+
           <section id="resultCard" class="callout" role="status" hidden>
             <span id="resultIcon" class="callout-icon" aria-hidden="true"></span>
             <div>

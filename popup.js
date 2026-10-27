@@ -68,6 +68,17 @@ const els = {
   setupBtn: $("setupBtn"),
   fillBtn: $("fillBtn"),
   stopBtn: $("stopBtn"),
+  fillCard: $("fillCard"),
+  checkCard: $("checkCard"),
+  checkWording: $("checkWording"),
+  checkHeading: $("checkHeading"),
+  checkSlot: $("checkSlot"),
+  checkMintRow: $("checkMintRow"),
+  checkMintName: $("checkMintName"),
+  checkAnswer: $("checkAnswer"),
+  checkSaveBtn: $("checkSaveBtn"),
+  checkSkipBtn: $("checkSkipBtn"),
+  checkStopBtn: $("checkStopBtn"),
   formError: $("formError"),
   runMeta: $("runMeta"),
   waitNotice: $("waitNotice"),
@@ -89,6 +100,7 @@ const ui = {
   waitTimer: 0,
   saveTimer: 0,
   savedTimer: 0,
+  checkFieldId: "",
 };
 
 document.documentElement.classList.add("surface-" + SURFACE);
@@ -217,10 +229,12 @@ function render() {
     els.headerSub.textContent = "Fill this page";
   }
 
+  const checking = Boolean(state.check);
   els.setupCard.hidden = running || hasKey() || SURFACE === "preview";
   els.fillBtn.disabled = running || ui.busy || !hasKey();
-  els.stopBtn.hidden = !running;
+  els.stopBtn.hidden = !running || checking;
   els.fillBtn.hidden = running;
+  if (els.fillCard) els.fillCard.hidden = checking;
 
   const meta = [];
   if (state.providerName) meta.push(state.providerName);
@@ -245,7 +259,11 @@ function render() {
     els.formError.hidden = true;
   }
 
-  if (state.lastError) {
+  renderCheck(state.check);
+
+  if (checking) {
+    els.resultCard.hidden = true;
+  } else if (state.lastError) {
     els.resultCard.hidden = false;
     els.resultCard.className = "callout is-error";
     els.resultIcon.innerHTML = ICONS.error;
@@ -262,6 +280,87 @@ function render() {
   }
 
   renderTimeline(state.logs || []);
+}
+
+function renderCheck(check) {
+  if (!els.checkCard) return;
+  if (!check) {
+    els.checkCard.hidden = true;
+    ui.checkFieldId = "";
+    return;
+  }
+  els.checkCard.hidden = false;
+  els.checkWording.textContent = check.wording || "This field";
+  const heading = String(check.headingWording || "").trim();
+  if (heading) {
+    els.checkHeading.hidden = false;
+    els.checkHeading.textContent = "Under “" + heading + "”";
+  } else {
+    els.checkHeading.hidden = true;
+    els.checkHeading.textContent = "";
+  }
+
+  const fresh = ui.checkFieldId !== check.fieldId;
+  if (fresh) {
+    ui.checkFieldId = check.fieldId || "";
+    populateSlotPicker(check);
+    els.checkAnswer.value = "";
+    els.checkMintName.value = check.proposedSlotName || check.wording || "";
+  } else {
+    // Keep the person's edits; refresh slot list in case the profile grew.
+    const selected = els.checkSlot.value;
+    populateSlotPicker(check, selected);
+  }
+  syncMintRow();
+  els.checkSaveBtn.disabled = ui.busy;
+  els.checkSkipBtn.disabled = ui.busy;
+  els.checkStopBtn.disabled = ui.busy;
+}
+
+function populateSlotPicker(check, preferred) {
+  const slots = (check && check.slots) || [];
+  const want = preferred != null ? preferred : check.preSelectedSlotId ? check.preSelectedSlotId : "__mint__";
+  els.checkSlot.innerHTML = "";
+  for (const slot of slots) {
+    const opt = document.createElement("option");
+    opt.value = slot.id;
+    opt.textContent = slot.name;
+    els.checkSlot.appendChild(opt);
+  }
+  const mint = document.createElement("option");
+  mint.value = "__mint__";
+  mint.textContent = "New slot…";
+  els.checkSlot.appendChild(mint);
+  const exists = Array.from(els.checkSlot.options).some((o) => o.value === want);
+  els.checkSlot.value = exists ? want : "__mint__";
+}
+
+function syncMintRow() {
+  const minting = els.checkSlot.value === "__mint__";
+  els.checkMintRow.hidden = !minting;
+}
+
+function checkPayload() {
+  const minting = els.checkSlot.value === "__mint__";
+  const answer = els.checkAnswer.value.trim();
+  if (!answer) {
+    ui.localError = "Type an answer before saving.";
+    render();
+    return null;
+  }
+  ui.localError = "";
+  if (minting) {
+    return {
+      type: "RESOLVE_CHECK",
+      mintName: els.checkMintName.value.trim() || (ui.state && ui.state.check && ui.state.check.proposedSlotName) || "",
+      answer,
+    };
+  }
+  return {
+    type: "RESOLVE_CHECK",
+    slotId: els.checkSlot.value,
+    answer,
+  };
 }
 
 function renderTimeline(logs) {
@@ -306,7 +405,15 @@ async function command(message) {
   }
 }
 
-function closeSurface() {
+async function closeSurface() {
+  const state = ui.state || {};
+  if (state.running || state.check) {
+    try {
+      await send({ type: "STOP" });
+    } catch {
+      // Closing still dismisses the panel.
+    }
+  }
   if (SURFACE === "overlay") {
     window.parent.postMessage({ source: "jev-fast", type: "CLOSE" }, "*");
   } else if (SURFACE === "popup") {
@@ -383,6 +490,21 @@ els.fillBtn.addEventListener("click", async () => {
 });
 
 els.stopBtn.addEventListener("click", () => command({ type: "STOP" }));
+els.checkSlot.addEventListener("change", () => {
+  if (els.checkSlot.value === "__mint__" && ui.state && ui.state.check) {
+    if (!els.checkMintName.value.trim()) {
+      els.checkMintName.value = ui.state.check.proposedSlotName || ui.state.check.wording || "";
+    }
+  }
+  syncMintRow();
+});
+els.checkSaveBtn.addEventListener("click", async () => {
+  const payload = checkPayload();
+  if (!payload) return;
+  await command(payload);
+});
+els.checkSkipBtn.addEventListener("click", () => command({ type: "SKIP" }));
+els.checkStopBtn.addEventListener("click", () => command({ type: "STOP" }));
 els.clearLog.addEventListener("click", () => command({ type: "CLEAR_LOG" }));
 els.copyLog.addEventListener("click", async () => {
   const text = logAsText(ui.state && ui.state.logs);
@@ -458,6 +580,15 @@ function createMockChrome() {
           }
         } else if (type === "STOP") {
           mockState.running = false;
+          mockState.check = null;
+        } else if (type === "SKIP") {
+          mockState.check = null;
+          mockState.running = false;
+          mockState.finished = true;
+        } else if (type === "RESOLVE_CHECK") {
+          mockState.check = null;
+          mockState.running = false;
+          mockState.finished = true;
         } else if (type === "FILL") {
           mockState = emptyState();
           mockState.finished = true;

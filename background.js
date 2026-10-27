@@ -91,6 +91,8 @@ const session = {
   minIntervalMs: 0,
   lastRequestAt: 0,
   profile: null,
+  pendingChecks: [],
+  fillGeneration: 0,
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -124,8 +126,20 @@ async function handleMessage(message, sender) {
     stopFill("Stopped by you.");
     return publicState();
   }
+  if (type === "SKIP") {
+    await skipCheck();
+    return publicState();
+  }
+  if (type === "RESOLVE_CHECK") {
+    await resolveCheck(message);
+    return publicState();
+  }
   if (type === "FILL") {
     await startFill(message.apiKey, message.provider, sender && sender.tab, message.endpoint);
+    return publicState();
+  }
+  if (type === "UNDO") {
+    // Undo persistence lands in a later ticket.
     return publicState();
   }
   return publicState();
@@ -143,7 +157,9 @@ async function startFill(apiKey, providerId, senderTab, endpointOverride) {
     broadcast();
     return;
   }
-  if (session.running) throw new Error("A fill is already in progress. Stop it before starting another.");
+  if (session.running || session.check) {
+    throw new Error("A fill is already in progress. Stop it before starting another.");
+  }
 
   const tab = await resolveTargetTab(senderTab);
   const sameProvider =
@@ -162,6 +178,8 @@ async function startFill(apiKey, providerId, senderTab, endpointOverride) {
   session.resolvedModel = "";
   session.logs = [];
   session.check = null;
+  session.pendingChecks = [];
+  session.fillGeneration = generation;
   session.undoAvailable = false;
   session.waitingUntil = 0;
   session.waitReason = "";
@@ -204,19 +222,33 @@ async function runFill(generation) {
   }
 
   const undecided = [];
+  const checks = [];
   for (const field of fields) {
+    if (!isCurrent(generation)) return;
     const local = matchAlias(profile, field);
     if (local && local.answer != null) {
       await writeAndRemember(field, local.answer, generation);
       continue;
     }
-    if (local && local.answer == null) {
-      // Missing answer becomes a check in later tickets; for now leave undecided for Jev.
+    if (local && local.slot && local.answer == null && local.situationId === undefined) {
+      // Slot hit whose heading is not an alias waits for Jev.
+      undecided.push(field);
+      continue;
+    }
+    if (local && local.slot && local.answer == null) {
+      checks.push(buildCheck(field, local.slot.id, local.situationId));
+      continue;
     }
     undecided.push(field);
   }
 
   if (!undecided.length) {
+    await saveProfile(profile);
+    if (!isCurrent(generation)) return;
+    if (checks.length) {
+      beginChecks(checks, profile, generation);
+      return;
+    }
     finishFill("Filled from aliases.");
     return;
   }
@@ -230,11 +262,16 @@ async function runFill(generation) {
   for (const field of undecided) {
     if (!isCurrent(generation)) return;
     const answer = payload.answers && payload.answers[field.id];
-    await applyChoice(field, answer, profile, generation);
+    const outcome = await applyChoice(field, answer, profile, generation);
+    if (outcome && outcome.check) checks.push(outcome.check);
   }
 
   await saveProfile(profile);
   if (!isCurrent(generation)) return;
+  if (checks.length) {
+    beginChecks(checks, profile, generation);
+    return;
+  }
   finishFill("Fill complete.");
 }
 
@@ -242,21 +279,180 @@ async function applyChoice(field, answer, profile, generation) {
   const confidence = choiceConfidence(answer);
   const picked = answer && answer.type === "choice" ? String(answer.choice || "") : "";
   if (!picked || picked === "none" || confidence < CONFIDENCE_THRESHOLD) {
-    // Checks open in a later ticket; confident writes are this ticket's scope.
-    return;
+    const parsedLow = picked && picked !== "none" ? parseOptionKey(picked) : null;
+    const slotId = parsedLow && parsedLow.kind !== "new" ? parsedLow.slotId : null;
+    const situationId = parsedLow && parsedLow.kind === "situation" ? parsedLow.situationId : null;
+    return { check: buildCheck(field, slotId, situationId) };
   }
   const parsed = parseOptionKey(picked);
-  if (!parsed || parsed.kind === "new") return;
+  if (!parsed) {
+    return { check: buildCheck(field, null, null) };
+  }
+  if (parsed.kind === "new") {
+    // Situational answers land in a later ticket; a new-situation choice is a check.
+    return { check: buildCheck(field, parsed.slotId, null) };
+  }
   const slot = profile.slots.find((s) => s.id === parsed.slotId);
-  if (!slot) return;
+  if (!slot) {
+    return { check: buildCheck(field, null, null) };
+  }
   const stored = findAnswer(profile, parsed.slotId, parsed.situationId);
-  if (!stored) return;
+  if (!stored) {
+    return { check: buildCheck(field, parsed.slotId, parsed.situationId) };
+  }
   await writeAndRemember(field, stored.value, generation);
   addAlias(slot, field.wording);
   if (parsed.kind === "situation" && parsed.situationId && field.headingWording) {
     const situation = profile.situations.find((s) => s.id === parsed.situationId);
     if (situation) addAlias(situation, field.headingWording);
   }
+  return null;
+}
+
+function buildCheck(field, preSelectedSlotId, preSelectedSituationId) {
+  return {
+    fieldId: field.id,
+    wording: field.wording || "",
+    headingWording: field.headingWording || "",
+    preSelectedSlotId: preSelectedSlotId || null,
+    preSelectedSituationId: preSelectedSituationId == null ? null : preSelectedSituationId,
+    proposedSlotName: String(field.wording || "").trim(),
+    optionRequired: false,
+    optionLabels: [],
+  };
+}
+
+function beginChecks(checks, profile, generation) {
+  session.pendingChecks = checks.slice();
+  session.profile = profile;
+  session.fillGeneration = generation;
+  session.running = true;
+  openNextCheck();
+}
+
+function publicCheck(check, profile) {
+  if (!check) return null;
+  return {
+    fieldId: check.fieldId,
+    wording: check.wording,
+    headingWording: check.headingWording,
+    preSelectedSlotId: check.preSelectedSlotId,
+    preSelectedSituationId: check.preSelectedSituationId,
+    proposedSlotName: check.proposedSlotName,
+    optionRequired: Boolean(check.optionRequired),
+    optionLabels: Array.isArray(check.optionLabels) ? check.optionLabels.slice() : [],
+    slots: (profile && profile.slots ? profile.slots : []).map((s) => ({ id: s.id, name: s.name })),
+  };
+}
+
+function openNextCheck() {
+  const next = session.pendingChecks.shift();
+  if (!next) {
+    session.check = null;
+    finishFill("Fill complete.");
+    return;
+  }
+  session.check = next;
+  log("warn", "Check: “" + next.wording + "”.", { kind: "check" });
+  broadcast();
+}
+
+async function skipCheck() {
+  if (!session.check) return;
+  const wording = session.check.wording;
+  session.check = null;
+  log("warn", "Skipped “" + wording + "”.", { kind: "skip" });
+  openNextCheck();
+}
+
+async function resolveCheck(message) {
+  if (!session.check) return;
+  const generation = session.fillGeneration;
+  if (!isCurrent(generation)) return;
+  const check = session.check;
+  let profile = session.profile || (await loadProfile());
+  const answerText = String((message && message.answer) || "").trim();
+  if (!answerText) {
+    session.lastError = "Type an answer before saving this check.";
+    broadcast();
+    return;
+  }
+
+  const mintName = String((message && message.mintName) || "").trim();
+  const slotId = String((message && message.slotId) || "").trim();
+  let slot = null;
+
+  if (!slotId) {
+    const name = mintName || check.proposedSlotName || check.wording;
+    if (!String(name || "").trim()) {
+      session.lastError = "Name the new slot before saving.";
+      broadcast();
+      return;
+    }
+    slot = mintSlot(profile, name, check.wording);
+  } else {
+    slot = profile.slots.find((s) => s.id === slotId);
+    if (!slot) {
+      session.lastError = "That slot is no longer in the profile.";
+      broadcast();
+      return;
+    }
+    addAlias(slot, check.wording);
+  }
+
+  // Situations stay default-only until ticket 04.
+  upsertAnswer(profile, slot.id, null, answerText);
+  await saveProfile(profile);
+  if (!isCurrent(generation)) return;
+
+  await writeAndRemember({ id: check.fieldId, wording: check.wording }, answerText, generation);
+  if (!isCurrent(generation)) return;
+
+  session.lastError = "";
+  session.check = null;
+  log("system", "Saved check for “" + check.wording + "”.", { kind: "check_saved" });
+  openNextCheck();
+}
+
+function mintSlot(profile, name, fieldWording) {
+  const trimmed = String(name || "").trim();
+  const id = uniqueSlotId(profile, trimmed);
+  const slot = { id: id, name: trimmed, aliases: [] };
+  const wording = String(fieldWording || "").trim();
+  if (wording) {
+    slot.aliases.push(wording);
+  }
+  profile.slots.push(slot);
+  return slot;
+}
+
+function uniqueSlotId(profile, name) {
+  const base = "slot_" + String(name || "slot")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 48);
+  const root = base || "slot_custom";
+  let id = root;
+  let n = 2;
+  const used = new Set(profile.slots.map((s) => s.id));
+  while (used.has(id)) {
+    id = root + "_" + n;
+    n += 1;
+  }
+  return id;
+}
+
+function upsertAnswer(profile, slotId, situationId, value) {
+  const existing = findAnswer(profile, slotId, situationId);
+  if (existing) {
+    existing.value = value;
+    return existing;
+  }
+  const row = { slotId: slotId, situationId: situationId, value: value, optionWordings: [] };
+  profile.answers.push(row);
+  return row;
 }
 
 async function writeAndRemember(field, value, generation) {
@@ -451,6 +647,7 @@ function stopFill(reason) {
   session.generation += 1;
   session.running = false;
   session.check = null;
+  session.pendingChecks = [];
   session.waitingUntil = 0;
   session.waitReason = "";
   if (reason) log("warn", reason, { kind: "stopped" });
@@ -461,6 +658,7 @@ function finishFill(reason) {
   session.running = false;
   session.finished = true;
   session.check = null;
+  session.pendingChecks = [];
   session.waitingUntil = 0;
   session.waitReason = "";
   if (reason) log("done", reason, { kind: "finish" });
@@ -471,6 +669,7 @@ function failFill(err) {
   session.running = false;
   session.finished = false;
   session.check = null;
+  session.pendingChecks = [];
   session.waitingUntil = 0;
   session.waitReason = "";
   session.lastError = errorText(err);
@@ -763,7 +962,7 @@ function publicState() {
     running: session.running,
     finished: session.finished,
     lastError: session.lastError,
-    check: session.check,
+    check: publicCheck(session.check, session.profile),
     undoAvailable: session.undoAvailable,
     openSettings: session.openSettings,
     confidenceThreshold: CONFIDENCE_THRESHOLD,
