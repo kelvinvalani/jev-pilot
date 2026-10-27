@@ -91,10 +91,23 @@ const session = {
   minIntervalMs: 0,
   lastRequestAt: 0,
   profile: null,
+  focusedSelector: null,
+  /** @type {{ tabId: number|null, selector: string|null }} */
+  capturedFocus: { tabId: null, selector: null },
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || !isControlMessage(message.type)) return false;
+  if (!message || !message.type) return false;
+  if (message.type === "FOCUS_CAPTURE") {
+    const tabId = sender && sender.tab && sender.tab.id != null ? sender.tab.id : null;
+    session.capturedFocus = {
+      tabId,
+      selector: message.focusedSelector ? String(message.focusedSelector) : null,
+    };
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (!isControlMessage(message.type)) return false;
   handleMessage(message, sender)
     .then((result) => sendResponse(result))
     .catch((err) => {
@@ -125,13 +138,13 @@ async function handleMessage(message, sender) {
     return publicState();
   }
   if (type === "FILL") {
-    await startFill(message.apiKey, message.provider, sender && sender.tab, message.endpoint);
+    await startFill(message.apiKey, message.provider, sender && sender.tab, message.endpoint, message.focusedSelector);
     return publicState();
   }
   return publicState();
 }
 
-async function startFill(apiKey, providerId, senderTab, endpointOverride) {
+async function startFill(apiKey, providerId, senderTab, endpointOverride, focusedSelector) {
   const key = String(apiKey || "").trim();
   const provider = PROVIDERS[providerId] || PROVIDERS.beatapi;
   const endpoint = resolveEndpoint(provider, endpointOverride);
@@ -165,6 +178,7 @@ async function startFill(apiKey, providerId, senderTab, endpointOverride) {
   session.undoAvailable = false;
   session.waitingUntil = 0;
   session.waitReason = "";
+  session.focusedSelector = resolveFocusedSelector(focusedSelector, tab.id);
   if (!sameProvider) {
     session.minIntervalMs = 0;
     session.lastRequestAt = 0;
@@ -185,6 +199,21 @@ async function startFill(apiKey, providerId, senderTab, endpointOverride) {
   }
 }
 
+function resolveFocusedSelector(fromMessage, tabId) {
+  if (fromMessage != null && String(fromMessage).trim()) {
+    session.capturedFocus = { tabId: null, selector: null };
+    return String(fromMessage);
+  }
+  const captured = session.capturedFocus;
+  if (captured && captured.tabId === tabId && captured.selector) {
+    const selector = captured.selector;
+    session.capturedFocus = { tabId: null, selector: null };
+    return selector;
+  }
+  session.capturedFocus = { tabId: null, selector: null };
+  return null;
+}
+
 async function runFill(generation) {
   await waitForTabReady(session.tabId);
   if (!isCurrent(generation)) return;
@@ -194,7 +223,9 @@ async function runFill(generation) {
   const profile = await loadProfile();
   session.profile = profile;
 
-  const listed = await sendToTab(session.tabId, { type: "LIST_FORM" });
+  const listMessage = { type: "LIST_FORM" };
+  if (session.focusedSelector) listMessage.focusedSelector = session.focusedSelector;
+  const listed = await sendToTab(session.tabId, listMessage);
   if (!isCurrent(generation)) return;
   if (!listed || !listed.ok) throw new Error((listed && listed.error) || "Could not read the form on this page.");
   const fields = listed.fields || [];
