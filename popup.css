@@ -1098,3 +1098,29 @@ textarea:disabled {
     transition: none !important;
   }
 }
+
+/* Check card */
+#checkCard select,
+#checkCard input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+#checkCard .help {
+  margin: 6px 0 0;
+}
+
+#checkCard .button-row {
+  margin-top: 4px;
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-2);
+}
+
+.btn-ghost:hover {
+  background: var(--surface-2, rgba(15, 23, 42, 0.04));
+  color: var(--text);
+}
