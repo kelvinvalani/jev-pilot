@@ -46,9 +46,11 @@ function loadBackground(options) {
 
   const runtimeListeners = [];
   const updatedListeners = [];
+  const storageListeners = [];
   const broadcasts = [];
   const tabMessages = [];
   const calls = [];
+  const storage = { ...(opts.storage || {}) };
   let tabClosed = false;
 
   const chrome = {
@@ -62,6 +64,28 @@ function loadBackground(options) {
       getPlatformInfo(cb) {
         if (cb) cb({ os: "linux" });
       },
+    },
+    storage: {
+      sync: {
+        get(keys, cb) {
+          const out = {};
+          const list = Array.isArray(keys) ? keys : keys == null ? Object.keys(storage) : [keys];
+          for (const key of list) if (key in storage) out[key] = storage[key];
+          if (cb) cb(out);
+          return Promise.resolve(out);
+        },
+        set(values, cb) {
+          const changes = {};
+          for (const [k, v] of Object.entries(values)) {
+            changes[k] = { oldValue: storage[k], newValue: v };
+            storage[k] = v;
+          }
+          for (const fn of storageListeners) fn(changes, "sync");
+          if (cb) cb();
+          return Promise.resolve();
+        },
+      },
+      onChanged: { addListener: (fn) => storageListeners.push(fn) },
     },
     tabs: {
       async query() {
@@ -159,11 +183,10 @@ function loadBackground(options) {
     throw new Error("Timed out waiting for " + (label || "condition") + ". State: " + JSON.stringify(state, null, 2));
   }
 
-  function start(extra) {
+  function fill(extra) {
     return send({
-      type: "START",
+      type: "FILL",
       apiKey: "sk-mock-not-a-real-key",
-      goal: "Search for flights from Melbourne to Tokyo",
       provider: "beatapi",
       ...(extra || {}),
     });
@@ -177,12 +200,13 @@ function loadBackground(options) {
     calls,
     broadcasts,
     tabMessages,
+    storage,
     context,
     send,
     status,
-    start,
+    fill,
     waitFor,
-    idle: () => waitFor((s) => !s.running || s.paused, "run to settle"),
+    idle: () => waitFor((s) => !s.running || s.check, "fill to settle"),
     closeTab() {
       tabClosed = true;
     },

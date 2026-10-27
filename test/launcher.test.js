@@ -59,15 +59,15 @@ test("a CLOSE message from the overlay iframe closes it; other windows are ignor
   assert.ok(!l.isOpen());
 });
 
-test("run status drives the badge and auto-opens when a step needs review", async () => {
+test("fill status drives the badge and auto-opens when a check is waiting", async () => {
   const l = mount();
   const send = (status) => l.page.deliver({ type: "JEV_FAST_STATUS", status });
-  await send({ running: true, paused: false });
+  await send({ running: true, check: null });
   assert.equal(l.layer().dataset.status, "running");
   assert.ok(!l.isOpen());
-  await send({ running: true, paused: true });
+  await send({ running: true, check: { wording: "First name" } });
   assert.equal(l.layer().dataset.status, "paused");
-  assert.ok(l.isOpen(), "opens so the user can confirm");
+  assert.ok(l.isOpen(), "opens so the user can resolve the check");
   await send({ running: false, error: true });
   assert.equal(l.layer().dataset.status, "error");
   await send({ running: false, finished: true });
@@ -93,8 +93,8 @@ test("restores the open overlay after same-tab navigation", () => {
   assert.ok(layer.classList.contains("open"));
 });
 
-test("does not respond to background EXTRACT/EXECUTE messages", async () => {
+test("does not respond to background LIST_FORM messages", async () => {
   const l = mount();
-  const res = await l.page.deliver({ type: "EXTRACT" });
+  const res = await l.page.deliver({ type: "LIST_FORM" });
   assert.equal(res, undefined);
 });

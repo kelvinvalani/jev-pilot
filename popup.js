@@ -1,8 +1,6 @@
 /**
- * Jev Fast — UI controller for the toolbar popup and the in-page overlay.
+ * Jev Fill — UI for the toolbar popup and the in-page overlay.
  * Talks to the service worker over chrome.runtime messaging.
- * When opened outside the extension (local preview), a mock runtime
- * produces the same state shape so the UI can be exercised without Chrome.
  */
 
 const IS_EXTENSION =
@@ -19,7 +17,6 @@ const SURFACE = (() => {
 const STORAGE_KEYS = {
   apiKey: "TYPESAFE_API_KEY",
   provider: "jevProvider",
-  goal: "lastGoal",
   showLauncher: "showLauncher",
   testEndpoint: "jevTestEndpoint",
 };
@@ -38,8 +35,6 @@ const PROVIDERS = {
     linkText: "Get a TypeSafe key",
   },
 };
-
-const GOAL_MAX = 2000;
 
 const ICONS = {
   success:
@@ -71,30 +66,11 @@ const els = {
   settingsDone: $("settingsDone"),
   setupCard: $("setupCard"),
   setupBtn: $("setupBtn"),
-  taskForm: $("taskForm"),
-  goal: $("goal"),
-  goalCount: $("goalCount"),
-  examples: $("examples"),
-  startBtn: $("startBtn"),
-  formError: $("formError"),
-  runCard: $("runCard"),
-  runGoal: $("runGoal"),
+  fillBtn: $("fillBtn"),
   stopBtn: $("stopBtn"),
-  progress: $("progress"),
-  progressBar: $("progressBar"),
+  formError: $("formError"),
   runMeta: $("runMeta"),
   waitNotice: $("waitNotice"),
-  confirmCard: $("confirmCard"),
-  confirmTitle: $("confirmTitle"),
-  confirmText: $("confirmText"),
-  confirmAction: $("confirmAction"),
-  confirmTarget: $("confirmTarget"),
-  confirmConfidence: $("confirmConfidence"),
-  confirmTextRow: $("confirmTextRow"),
-  confirmInput: $("confirmInput"),
-  confirmBtn: $("confirmBtn"),
-  skipBtn: $("skipBtn"),
-  confirmStopBtn: $("confirmStopBtn"),
   resultCard: $("resultCard"),
   resultIcon: $("resultIcon"),
   resultTitle: $("resultTitle"),
@@ -108,7 +84,6 @@ const els = {
 const ui = {
   state: null,
   settingsOpen: false,
-  confirmKey: "",
   busy: false,
   localError: "",
   waitTimer: 0,
@@ -144,8 +119,6 @@ function send(message) {
   });
 }
 
-/* ---------- Settings ---------- */
-
 function selectedProvider() {
   const checked = els.providerInputs.find((input) => input.checked);
   return checked && PROVIDERS[checked.value] ? checked.value : "beatapi";
@@ -172,7 +145,6 @@ function persistSettings(options) {
   const payload = {
     [STORAGE_KEYS.apiKey]: els.apiKey.value.trim(),
     [STORAGE_KEYS.provider]: selectedProvider(),
-    [STORAGE_KEYS.goal]: els.goal.value,
     [STORAGE_KEYS.showLauncher]: els.showLauncher.checked,
     [STORAGE_KEYS.testEndpoint]: els.testEndpoint.value.trim(),
   };
@@ -199,11 +171,9 @@ function loadSettings() {
       if (data[STORAGE_KEYS.provider] && PROVIDERS[data[STORAGE_KEYS.provider]]) {
         setProvider(data[STORAGE_KEYS.provider]);
       }
-      if (data[STORAGE_KEYS.goal]) els.goal.value = data[STORAGE_KEYS.goal];
       els.showLauncher.checked = data[STORAGE_KEYS.showLauncher] !== false;
       if (data[STORAGE_KEYS.testEndpoint]) els.testEndpoint.value = data[STORAGE_KEYS.testEndpoint];
       applyProviderUi();
-      updateGoalCount();
       resolve();
     });
   });
@@ -218,17 +188,14 @@ function openSettings(open) {
     window.setTimeout(() => (hasKey() ? els.settingsDone : els.apiKey).focus(), 0);
   } else {
     render();
-    if (!els.goal.disabled) els.goal.focus();
   }
 }
 
-/* ---------- Rendering ---------- */
-
 function statusFor(state) {
   if (!state) return { key: "idle", label: "Ready" };
-  if (state.running && state.paused) return { key: "paused", label: "Needs review" };
+  if (state.running && state.check) return { key: "paused", label: "Needs a check" };
   if (state.running && state.waitingUntil > Date.now()) return { key: "waiting", label: "Waiting" };
-  if (state.running) return { key: "running", label: "Step " + (state.step || 0) + " of " + (state.maxSteps || 15) };
+  if (state.running) return { key: "running", label: "Filling" };
   if (state.lastError) return { key: "error", label: "Error" };
   if (state.finished) return { key: "done", label: "Done" };
   return { key: "idle", label: "Ready" };
@@ -237,7 +204,6 @@ function statusFor(state) {
 function render() {
   const state = ui.state || {};
   const running = Boolean(state.running);
-  const paused = Boolean(state.paused);
   const status = statusFor(ui.state);
 
   els.statusPill.dataset.state = status.key;
@@ -248,254 +214,81 @@ function render() {
   } else if (running && state.tabTitle) {
     els.headerSub.textContent = state.tabTitle;
   } else {
-    els.headerSub.textContent = "Automate this page";
+    els.headerSub.textContent = "Fill this page";
   }
-  els.headerSub.title = els.headerSub.textContent;
 
   els.setupCard.hidden = running || hasKey() || SURFACE === "preview";
+  els.fillBtn.disabled = running || ui.busy || !hasKey();
+  els.stopBtn.hidden = !running;
+  els.fillBtn.hidden = running;
 
-  els.taskForm.hidden = running;
-  els.goal.disabled = running || ui.busy;
-  els.startBtn.disabled = running || ui.busy;
-  els.apiKey.disabled = running;
-  els.testEndpoint.disabled = running;
-  for (const input of els.providerInputs) input.disabled = running;
-  els.formError.hidden = !ui.localError;
-  els.formError.textContent = ui.localError;
+  const meta = [];
+  if (state.providerName) meta.push(state.providerName);
+  if (state.model) meta.push(state.model);
+  if (state.localEndpoint) meta.push("local test endpoint");
+  els.runMeta.textContent = meta.join(" · ");
 
-  renderRun(state, running);
-  renderConfirm(state, running && paused);
-  renderResult(state, running);
+  if (state.waitingUntil > Date.now() && state.waitReason) {
+    els.waitNotice.hidden = false;
+    const seconds = Math.max(0, Math.ceil((state.waitingUntil - Date.now()) / 1000));
+    els.waitNotice.textContent = state.waitReason + " — " + seconds + "s left";
+    window.clearTimeout(ui.waitTimer);
+    ui.waitTimer = window.setTimeout(render, 1000);
+  } else {
+    els.waitNotice.hidden = true;
+  }
+
+  if (ui.localError) {
+    els.formError.hidden = false;
+    els.formError.textContent = ui.localError;
+  } else {
+    els.formError.hidden = true;
+  }
+
+  if (state.lastError) {
+    els.resultCard.hidden = false;
+    els.resultCard.className = "callout is-error";
+    els.resultIcon.innerHTML = ICONS.error;
+    els.resultTitle.textContent = "Fill stopped";
+    els.resultText.textContent = state.lastError;
+  } else if (state.finished && !running) {
+    els.resultCard.hidden = false;
+    els.resultCard.className = "callout is-success";
+    els.resultIcon.innerHTML = ICONS.success;
+    els.resultTitle.textContent = "Fill complete";
+    els.resultText.textContent = "Review the form, then submit it yourself.";
+  } else {
+    els.resultCard.hidden = true;
+  }
+
   renderTimeline(state.logs || []);
 }
 
-function renderRun(state, running) {
-  els.runCard.hidden = !running;
-  if (!running) {
-    stopWaitTimer();
-    return;
-  }
-  const max = state.maxSteps || 15;
-  const step = Math.min(state.step || 0, max);
-  els.runGoal.textContent = state.goal || els.goal.value.trim();
-  els.progress.setAttribute("aria-valuemax", String(max));
-  els.progress.setAttribute("aria-valuenow", String(step));
-  els.progressBar.style.width = Math.round((step / max) * 100) + "%";
-  const bits = ["Step " + step + " of " + max];
-  if (state.providerName) bits.push(state.providerName + (state.model ? " · " + state.model : ""));
-  if (state.localEndpoint) bits.push("local test endpoint");
-  els.runMeta.textContent = bits.join(" · ");
-  renderWait(state);
-}
-
-function renderWait(state) {
-  const remaining = state.waitingUntil ? state.waitingUntil - Date.now() : 0;
-  if (remaining <= 0 || state.paused) {
-    els.waitNotice.hidden = true;
-    stopWaitTimer();
-    return;
-  }
-  els.waitNotice.hidden = false;
-  els.waitNotice.textContent =
-    (state.waitReason || "Waiting") + " — " + Math.ceil(remaining / 1000) + "s left";
-  if (!ui.waitTimer) {
-    ui.waitTimer = window.setInterval(() => {
-      if (!ui.state) return;
-      renderWait(ui.state);
-      const status = statusFor(ui.state);
-      els.statusPill.dataset.state = status.key;
-      els.statusText.textContent = status.label;
-    }, 1000);
-  }
-}
-
-function stopWaitTimer() {
-  if (ui.waitTimer) {
-    window.clearInterval(ui.waitTimer);
-    ui.waitTimer = 0;
-  }
-}
-
-function renderConfirm(state, visible) {
-  const pending = visible ? state.pendingConfirmation : null;
-  if (!pending) {
-    els.confirmCard.hidden = true;
-    ui.confirmKey = "";
-    return;
-  }
-  const key = [pending.step, pending.reason, pending.targetId, pending.actionType].join("|");
-  const fresh = key !== ui.confirmKey;
-  ui.confirmKey = key;
-
-  els.confirmCard.hidden = false;
-  els.confirmTitle.textContent = pending.title || "Review this step";
-  els.confirmText.textContent = pending.message || "";
-  const action = String(pending.actionType || "click").toLowerCase();
-  els.confirmAction.textContent = action.toUpperCase();
-  els.confirmAction.dataset.action = action;
-  els.confirmTarget.textContent = pending.targetLabel || pending.targetId || "";
-  els.confirmTarget.title = els.confirmTarget.textContent;
-  els.confirmConfidence.textContent =
-    typeof pending.confidence === "number" ? Math.round(pending.confidence * 100) + "%" : "";
-
-  const needsText = action === "type";
-  els.confirmTextRow.hidden = !needsText;
-  els.confirmBtn.textContent = needsText ? "Type it" : "Run this step";
-  els.confirmBtn.disabled = ui.busy;
-  els.skipBtn.disabled = ui.busy;
-  if (fresh) {
-    els.confirmInput.value = pending.suggestedText || "";
-    window.setTimeout(() => (needsText ? els.confirmInput : els.confirmBtn).focus(), 0);
-  }
-}
-
-function renderResult(state, running) {
-  const logs = state.logs || [];
-  let variant = "";
-  let title = "";
-  let text = "";
-  if (!running && state.lastError) {
-    variant = "error";
-    title = "Something went wrong";
-    text = state.lastError;
-  } else if (!running && state.finished) {
-    const last = findLast(logs, (entry) => entry.kind === "finish" || entry.level === "done");
-    const limit = last && /limit|could not/i.test(last.text || "");
-    variant = limit ? "warn" : "success";
-    title = limit ? "Stopped early" : "Goal complete";
-    text = last ? last.text : "";
-  } else if (!running && logs.length) {
-    const last = logs[logs.length - 1];
-    if (last && last.kind === "stopped") {
-      variant = "warn";
-      title = "Stopped";
-      text = "The task was stopped. Nothing else will happen on the page.";
-    }
-  }
-  els.resultCard.hidden = !variant;
-  if (!variant) return;
-  els.resultCard.className = "callout is-" + variant;
-  els.resultIcon.innerHTML = ICONS[variant];
-  els.resultTitle.textContent = title;
-  els.resultText.textContent = text;
-}
-
 function renderTimeline(logs) {
-  const items = buildTimeline(logs);
-  els.timeline.textContent = "";
-  els.emptyLog.hidden = items.length > 0;
-  els.copyLog.hidden = items.length === 0;
-  els.clearLog.hidden = items.length === 0 || Boolean(ui.state && ui.state.running);
-  for (const item of items) els.timeline.appendChild(item);
-  const last = els.timeline.lastElementChild;
-  if (last && typeof last.scrollIntoView === "function") {
-    last.scrollIntoView({ block: "nearest" });
+  const rows = logs.filter((entry) => entry && entry.text && entry.kind !== "extract");
+  els.timeline.innerHTML = "";
+  els.emptyLog.hidden = rows.length > 0;
+  els.copyLog.hidden = rows.length === 0;
+  els.clearLog.hidden = rows.length === 0;
+  for (const entry of rows) {
+    const li = document.createElement("li");
+    li.className = "step";
+    li.textContent = entry.text;
+    els.timeline.appendChild(li);
   }
-}
-
-function buildTimeline(logs) {
-  const nodes = [];
-  let lastStep = null;
-  for (const entry of logs) {
-    if (!entry || !entry.text) continue;
-    if (entry.kind === "extract") continue;
-    if (entry.kind === "step") {
-      lastStep = stepNode(entry);
-      nodes.push(lastStep);
-      continue;
-    }
-    if (entry.kind === "result" && lastStep) {
-      const sub = document.createElement("p");
-      sub.className = "step-sub";
-      sub.textContent = entry.text;
-      lastStep.querySelector(".step-body").appendChild(sub);
-      continue;
-    }
-    if (entry.kind === "finish" || entry.kind === "error") continue;
-    nodes.push(noteNode(entry));
-  }
-  return nodes;
-}
-
-function stepNode(entry) {
-  const li = document.createElement("li");
-  li.className = "step";
-  const body = document.createElement("div");
-  body.className = "step-body";
-
-  const top = document.createElement("div");
-  top.className = "step-top";
-  const num = document.createElement("span");
-  num.className = "step-num";
-  num.textContent = String(entry.step || "").padStart(2, "0");
-  const badge = document.createElement("span");
-  badge.className = "action-badge";
-  const action = String(entry.action || "").toLowerCase();
-  badge.dataset.action = action;
-  badge.textContent = action.toUpperCase();
-  const target = document.createElement("span");
-  target.className = "step-target";
-  target.textContent = action === "finish" ? "Goal complete" : entry.targetLabel || entry.targetId || "";
-  target.title = (entry.targetId ? entry.targetId + " — " : "") + (entry.targetLabel || "");
-  top.append(num, badge, target);
-
-  const meta = document.createElement("div");
-  meta.className = "step-meta";
-  const confidence = typeof entry.confidence === "number" ? entry.confidence : 0;
-  const threshold = (ui.state && ui.state.confidenceThreshold) || 0.6;
-  const meter = document.createElement("span");
-  meter.className = "meter" + (confidence < threshold ? " is-low" : "");
-  const fill = document.createElement("span");
-  fill.style.width = Math.round(confidence * 100) + "%";
-  meter.appendChild(fill);
-  const pct = document.createElement("span");
-  pct.textContent = Math.round(confidence * 100) + "% confident";
-  const latency = document.createElement("span");
-  latency.textContent = typeof entry.latencyMs === "number" ? entry.latencyMs + " ms" : "";
-  meta.append(meter, pct, latency);
-
-  body.append(top, meta);
-  li.appendChild(body);
-  return li;
-}
-
-function noteNode(entry) {
-  const li = document.createElement("li");
-  const level = entry.level === "error" ? "error" : entry.level === "warn" ? "warn" : entry.level === "done" ? "done" : "";
-  li.className = "note" + (level ? " " + level : "");
-  li.textContent = entry.text;
-  return li;
-}
-
-function findLast(list, predicate) {
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (predicate(list[i])) return list[i];
-  }
-  return null;
 }
 
 function applyState(state) {
-  if (!state || typeof state !== "object") return;
-  ui.state = state;
-  if (state.running) ui.localError = "";
+  ui.state = state || null;
+  if (state && state.openSettings) openSettings(true);
   render();
-}
-
-function updateGoalCount() {
-  els.goalCount.textContent = els.goal.value.length + " / " + GOAL_MAX;
-}
-
-function showLocalError(message, focusEl) {
-  ui.localError = message;
-  render();
-  if (focusEl) focusEl.focus();
 }
 
 async function refreshState() {
   try {
     applyState(await send({ type: "GET_STATUS" }));
   } catch {
-    render();
+    applyState(null);
   }
 }
 
@@ -505,7 +298,8 @@ async function command(message) {
   try {
     applyState(await send(message));
   } catch (err) {
-    showLocalError(String((err && err.message) || err));
+    ui.localError = String((err && err.message) || err);
+    render();
   } finally {
     ui.busy = false;
     render();
@@ -526,8 +320,6 @@ function logAsText(logs) {
     .map((entry) => new Date(entry.ts || Date.now()).toLocaleTimeString() + "  " + entry.text)
     .join("\n");
 }
-
-/* ---------- Events ---------- */
 
 els.settingsBtn.addEventListener("click", () => openSettings(!ui.settingsOpen));
 els.settingsDone.addEventListener("click", () => {
@@ -564,6 +356,7 @@ for (const input of els.providerInputs) {
 els.apiKey.addEventListener("input", () => {
   ui.localError = "";
   schedulePersist(true);
+  render();
 });
 
 els.testEndpoint.addEventListener("input", () => schedulePersist(true));
@@ -577,68 +370,19 @@ els.toggleKey.addEventListener("click", () => {
 
 els.showLauncher.addEventListener("change", () => persistSettings());
 
-els.goal.addEventListener("input", () => {
-  updateGoalCount();
-  if (ui.localError) {
-    ui.localError = "";
-    render();
-  }
-  schedulePersist(false);
-});
-
-els.goal.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    els.taskForm.requestSubmit();
-  }
-});
-
-els.examples.addEventListener("click", (event) => {
-  const chip = event.target.closest("[data-example]");
-  if (!chip || els.goal.disabled) return;
-  els.goal.value = chip.dataset.example;
-  updateGoalCount();
-  schedulePersist(false);
-  els.goal.focus();
-});
-
-els.taskForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+els.fillBtn.addEventListener("click", async () => {
   const apiKey = els.apiKey.value.trim();
-  const goal = els.goal.value.trim();
   if (!apiKey && SURFACE !== "preview") {
     openSettings(true);
-    return;
-  }
-  if (!goal) {
-    showLocalError("Describe what Jev should do on this page.", els.goal);
     return;
   }
   ui.localError = "";
   persistSettings();
   const endpoint = els.testEndpoint.value.trim();
-  await command({ type: "START", apiKey, goal, provider: selectedProvider(), ...(endpoint ? { endpoint } : {}) });
+  await command({ type: "FILL", apiKey, provider: selectedProvider(), ...(endpoint ? { endpoint } : {}) });
 });
 
 els.stopBtn.addEventListener("click", () => command({ type: "STOP" }));
-els.confirmStopBtn.addEventListener("click", () => command({ type: "STOP" }));
-els.skipBtn.addEventListener("click", () => command({ type: "SKIP" }));
-els.confirmBtn.addEventListener("click", () => {
-  const pending = ui.state && ui.state.pendingConfirmation;
-  if (!pending) return;
-  if (String(pending.actionType).toLowerCase() === "type" && !els.confirmInput.value.trim()) {
-    els.confirmInput.focus();
-    return;
-  }
-  command({ type: "CONFIRM", textValue: els.confirmInput.value });
-});
-els.confirmInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    els.confirmBtn.click();
-  }
-});
-
 els.clearLog.addEventListener("click", () => command({ type: "CLEAR_LOG" }));
 els.copyLog.addEventListener("click", async () => {
   const text = logAsText(ui.state && ui.state.logs);
@@ -661,34 +405,26 @@ loadSettings()
   .then(refreshState)
   .then(() => {
     if (!hasKey() && SURFACE !== "preview") openSettings(true);
-    else if (!els.goal.disabled) els.goal.focus();
   });
-
-/* ---------- Preview mock runtime ---------- */
 
 function createMockChrome() {
   const memory = {
     TYPESAFE_API_KEY: "",
     jevProvider: "beatapi",
-    lastGoal: "Search for flights from Melbourne to Tokyo",
     showLauncher: true,
   };
   const listeners = [];
-  let timer = 0;
-  let generation = 0;
-  let resume = null;
   let mockState = emptyState();
 
   function emptyState() {
     return {
       running: false,
-      paused: false,
       finished: false,
       lastError: "",
-      step: 0,
-      maxSteps: 15,
-      confidenceThreshold: 0.6,
-      goal: "",
+      check: null,
+      undoAvailable: false,
+      openSettings: false,
+      confidenceThreshold: 0.85,
       provider: "beatapi",
       providerName: "BeatAPI",
       model: "jev-1.14-free",
@@ -697,7 +433,6 @@ function createMockChrome() {
       waitingUntil: 0,
       waitReason: "",
       logs: [],
-      pendingConfirmation: null,
     };
   }
 
@@ -711,89 +446,6 @@ function createMockChrome() {
     return state;
   }
 
-  function push(level, text, meta) {
-    mockState.logs = mockState.logs.concat([{ level, text, ts: Date.now(), ...(meta || {}) }]);
-    broadcast();
-  }
-
-  function delay(ms) {
-    return new Promise((resolve) => {
-      timer = window.setTimeout(resolve, ms);
-    });
-  }
-
-  const script = [
-    { action: "type", targetId: "elem_0", targetLabel: "From · Origin city", confidence: 0.97, latencyMs: 118, textValue: "Melbourne" },
-    { action: "type", targetId: "elem_1", targetLabel: "To · Destination city", confidence: 0.96, latencyMs: 104, textValue: "Tokyo" },
-    { action: "click", targetId: "elem_3", targetLabel: "Search flights", confidence: 0.54, latencyMs: 91 },
-    { action: "finish", targetId: "none_applicable", targetLabel: "", confidence: 0.94, latencyMs: 87 },
-  ];
-
-  function resultText(row) {
-    return row.action === "type"
-      ? "Typed “" + row.textValue + "” into " + row.targetLabel + "."
-      : "Clicked “" + row.targetLabel + "”.";
-  }
-
-  async function runDemo(goal) {
-    generation += 1;
-    const gen = generation;
-    mockState = emptyState();
-    mockState.running = true;
-    mockState.goal = goal;
-    push("system", "Preview mode — load the unpacked extension to control a real tab.", { kind: "start" });
-    for (let i = 0; i < script.length; i += 1) {
-      if (gen !== generation) return;
-      mockState.step = i + 1;
-      broadcast();
-      await delay(650);
-      if (gen !== generation) return;
-      const row = script[i];
-      push("action", "[Step " + (i + 1) + "] " + row.action.toUpperCase() + " " + row.targetId, {
-        kind: "step",
-        step: i + 1,
-        ...row,
-      });
-      if (row.action === "finish") break;
-      if (row.confidence < 0.6) {
-        mockState.paused = true;
-        mockState.pendingConfirmation = {
-          step: i + 1,
-          reason: "confidence",
-          title: "Low confidence — review this step",
-          message: "Jev is " + Math.round(row.confidence * 100) + "% confident about this step, below the 60% auto-run threshold.",
-          targetId: row.targetId,
-          targetLabel: row.targetLabel,
-          actionType: row.action,
-          confidence: row.confidence,
-          suggestedText: "",
-        };
-        push("warn", "Low confidence — waiting for your review.", { kind: "review" });
-        const decision = await new Promise((resolve) => {
-          resume = resolve;
-        });
-        if (gen !== generation) return;
-        if (decision === "skip") {
-          push("warn", "Skipped this step. Continuing.");
-          continue;
-        }
-      }
-      push("system", resultText(row), { kind: "result" });
-    }
-    if (gen !== generation) return;
-    mockState.running = false;
-    mockState.finished = true;
-    push("done", "Jev reported the goal is complete.", { kind: "finish" });
-  }
-
-  function settle(decision) {
-    mockState.paused = false;
-    mockState.pendingConfirmation = null;
-    const fn = resume;
-    resume = null;
-    if (fn) fn(decision);
-  }
-
   return {
     runtime: {
       sendMessage(message, cb) {
@@ -805,20 +457,11 @@ function createMockChrome() {
             mockState.lastError = "";
           }
         } else if (type === "STOP") {
-          const wasRunning = mockState.running;
-          generation += 1;
-          window.clearTimeout(timer);
-          settle("stop");
           mockState.running = false;
-          if (wasRunning) push("warn", "Stopped by you.", { kind: "stopped" });
-        } else if (type === "START") {
-          window.clearTimeout(timer);
-          settle("stop");
-          runDemo(String(message.goal || ""));
-        } else if (type === "CONFIRM") {
-          settle("confirm");
-        } else if (type === "SKIP") {
-          settle("skip");
+        } else if (type === "FILL") {
+          mockState = emptyState();
+          mockState.finished = true;
+          mockState.logs = [{ level: "done", text: "Preview mode — load the unpacked extension to fill a real tab.", kind: "finish", ts: Date.now() }];
         }
         const state = broadcast();
         if (typeof cb === "function") window.setTimeout(() => cb(state), 0);
