@@ -35,14 +35,10 @@
     }
   });
 
-  function listForm() {
+  function listForm(focusedSelector) {
     clearMarkers();
     fieldMap = new Map();
-    const formEl = pickForm();
-    if (!formEl) {
-      return { ok: true, fields: [] };
-    }
-    const fields = collectEmptyFields(formEl);
+    const fields = pickEmptyFields(focusedSelector);
     const result = [];
     for (let i = 0; i < fields.length; i += 1) {
       const id = "field_" + i;
@@ -60,22 +56,173 @@
     return { ok: true, fields: result };
   }
 
-  function pickForm() {
-    const forms = Array.from(document.querySelectorAll("form")).filter((form) => !isExtensionUi(form));
-    if (!forms.length) {
-      const fields = collectEmptyFields(document.body);
-      return fields.length ? document.body : null;
+  function pickEmptyFields(focusedSelector) {
+    const focused = resolveFocusedField(focusedSelector);
+    if (focused) {
+      const form = focused.closest("form");
+      if (form && !isExtensionUi(form)) {
+        return collectEmptyFields(form);
+      }
+      return visualGroupFor(focused);
     }
-    let best = forms[0];
-    let bestCount = collectEmptyFields(best).length;
-    for (let i = 1; i < forms.length; i += 1) {
-      const count = collectEmptyFields(forms[i]).length;
-      if (count > bestCount) {
-        best = forms[i];
-        bestCount = count;
+    const forms = Array.from(document.querySelectorAll("form")).filter((form) => !isExtensionUi(form));
+    if (forms.length) {
+      let best = null;
+      let bestCount = -1;
+      for (const form of forms) {
+        const count = collectEmptyFields(form).length;
+        // Strict greater-than keeps the first form on a tie (tree order).
+        if (count > bestCount) {
+          best = form;
+          bestCount = count;
+        }
+      }
+      return best ? collectEmptyFields(best) : [];
+    }
+    return largestVisualGroup();
+  }
+
+  function resolveFocusedField(focusedSelector) {
+    if (!focusedSelector) return null;
+    let el = null;
+    try {
+      el = document.querySelector(focusedSelector);
+    } catch {
+      el = null;
+    }
+    if (!el) {
+      const deep = queryAllDeep(document, focusedSelector);
+      el = deep[0] || null;
+    }
+    if (!el || !(el instanceof Element)) return null;
+    if (isExtensionUi(el)) return null;
+    if (isField(el)) return el;
+    const nested = queryAllDeep(el, "input, textarea, select, [contenteditable='true']");
+    for (const candidate of nested) {
+      if (isField(candidate)) return candidate;
+    }
+    let node = el.parentElement;
+    while (node && node !== document.documentElement) {
+      if (isField(node)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function visualGroupFor(focusedEl) {
+    const heading = nearestHeadingEl(focusedEl);
+    if (heading) return fieldsUnderHeading(heading);
+    const parent = focusedEl.parentElement || document.body;
+    return emptyFieldsSharingParent(parent);
+  }
+
+  function largestVisualGroup() {
+    const all = collectEmptyFields(document.body);
+    if (!all.length) return [];
+    /** @type {Map<string, { fields: object[], firstIndex: number }>} */
+    const groups = new Map();
+    for (let i = 0; i < all.length; i += 1) {
+      const entry = all[i];
+      const key = visualGroupKey(entry.el);
+      let group = groups.get(key);
+      if (!group) {
+        group = { fields: [], firstIndex: i };
+        groups.set(key, group);
+      }
+      group.fields.push(entry);
+    }
+    let best = null;
+    for (const group of groups.values()) {
+      if (
+        !best ||
+        group.fields.length > best.fields.length ||
+        (group.fields.length === best.fields.length && group.firstIndex < best.firstIndex)
+      ) {
+        best = group;
+      }
+    }
+    return best ? best.fields : [];
+  }
+
+  function visualGroupKey(el) {
+    const heading = nearestHeadingEl(el);
+    if (heading) return "h:" + elementPath(heading);
+    const parent = el.parentElement || document.body;
+    return "p:" + elementPath(parent);
+  }
+
+  function emptyFieldsSharingParent(parent) {
+    const out = [];
+    for (const entry of collectEmptyFields(parent)) {
+      if (entry.el.parentElement === parent) out.push(entry);
+    }
+    return out;
+  }
+
+  function fieldsUnderHeading(heading) {
+    if (heading instanceof HTMLLegendElement) {
+      const fieldset = heading.closest("fieldset");
+      if (fieldset) return collectEmptyFields(fieldset);
+    }
+    const out = [];
+    for (const entry of collectEmptyFields(document.body)) {
+      if (nearestHeadingEl(entry.el) === heading) out.push(entry);
+    }
+    return out;
+  }
+
+  function nearestHeadingEl(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      if (node instanceof HTMLFieldSetElement) {
+        const legend = node.querySelector(":scope > legend");
+        if (legend && innerText(legend)) return legend;
+      }
+      node = node.parentElement;
+    }
+    const all = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"));
+    let best = null;
+    let bestRank = 99;
+    for (const heading of all) {
+      if (!(heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+      const rank = Number(heading.tagName.charAt(1));
+      const after = all.find(
+        (h) =>
+          Number(h.tagName.charAt(1)) <= rank &&
+          heading.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING &&
+          h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING
+      );
+      if (after) continue;
+      if (rank <= bestRank) {
+        bestRank = rank;
+        best = heading;
       }
     }
     return best;
+  }
+
+  function elementPath(el) {
+    if (!el || el === document.documentElement) return "html";
+    if (el.id) return "#" + cssEscape(el.id);
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      let part = node.tagName.toLowerCase();
+      if (node.id) {
+        parts.unshift("#" + cssEscape(node.id));
+        break;
+      }
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+        if (siblings.length > 1) {
+          part += ":nth-of-type(" + (siblings.indexOf(node) + 1) + ")";
+        }
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.join(">") || "html";
   }
 
   function collectEmptyFields(root) {
@@ -174,36 +321,9 @@
   }
 
   function headingWording(el) {
-    let node = el.parentElement;
-    while (node && node !== document.body) {
-      if (node instanceof HTMLFieldSetElement) {
-        const legend = node.querySelector(":scope > legend");
-        if (legend) {
-          const text = innerText(legend);
-          if (text) return clip(text, LABEL_MAX);
-        }
-      }
-      node = node.parentElement;
-    }
-    const all = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"));
-    let best = "";
-    let bestRank = 99;
-    for (const heading of all) {
-      if (!(heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
-      const rank = Number(heading.tagName.charAt(1));
-      const after = all.find(
-        (h) =>
-          Number(h.tagName.charAt(1)) <= rank &&
-          heading.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING &&
-          h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING
-      );
-      if (after) continue;
-      if (rank <= bestRank) {
-        bestRank = rank;
-        best = innerText(heading);
-      }
-    }
-    return clip(best, LABEL_MAX);
+    const heading = nearestHeadingEl(el);
+    if (!heading) return "";
+    return clip(innerText(heading), LABEL_MAX);
   }
 
   function writeField(fieldId, value) {
