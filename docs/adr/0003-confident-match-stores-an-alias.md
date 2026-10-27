@@ -1,0 +1,3 @@
+# A confident match stores an alias
+
+A fill writes a match at a confidence of 0.85 or above and stores that field wording as an alias of the slot, so the same wording fills next time without asking. Below that, or no slot, is a check. Re-deciding every visit was rejected because the same wording would keep interrupting. Accepting only an exact stored wording was rejected because "First name" would still ask after "Given name" had been accepted for the same slot. The 0.60 pause line from the old automater was rejected because it would store wrong aliases. Which fields are in scope for that decision is ADR 0006.

@@ -1,0 +1,5 @@
+# A special heading does not set the default
+
+The first version of ADR 0008 saved the first answer for a starter slot as the default. That poisons the profile when the first form is someone else's fact under a specific heading, such as a parent's name under "Emergency contact".
+
+The default is saved only when the heading is the usual ask for that slot, or when the user chooses "this is my usual answer" in the check while the slot has no default yet. A heading that is a special circumstance stores a situation, and the default stays empty. A new situation is never written on confidence alone. The check still asks the user to accept or edit the heading as its name. Once a default exists, "this is my usual answer" writes that answer into the field and does not replace the stored string. The user changes the stored string in the profile. On a check for a new situation, that choice also stores no situation: the heading was not special, and the field wording becomes an alias of the slot. An answer the user types in that check is stored only on the new situation.
