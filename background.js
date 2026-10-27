@@ -224,6 +224,8 @@ async function runFill(generation) {
   const body = buildFillRequest(undecided, profile);
   const { payload, latencyMs } = await callJev(session.apiKey, body, generation);
   if (!isCurrent(generation)) return;
+  assertValidAnswers(undecided, payload, body.questions);
+  if (!isCurrent(generation)) return;
   session.resolvedModel = payload.model || session.provider.model;
   log("info", "Jev answered in " + latencyMs + "ms.", { kind: "jev", latencyMs });
 
@@ -236,6 +238,34 @@ async function runFill(generation) {
   await saveProfile(profile);
   if (!isCurrent(generation)) return;
   finishFill("Fill complete.");
+}
+
+function assertValidAnswers(fields, payload, questions) {
+  const answers = payload && payload.answers;
+  if (!answers || typeof answers !== "object") {
+    throw new JevApiError("Jev returned a response without an answers object.", 200, "bad_response");
+  }
+  for (const field of fields) {
+    const answer = answers[field.id];
+    if (answer == null || typeof answer !== "object") {
+      throw new JevApiError("Jev returned no answer for “" + field.wording + "”.", 200, "bad_response");
+    }
+    if (answer.type !== "choice") {
+      throw new JevApiError("Jev did not return a typed Choice for “" + field.wording + "”.", 200, "bad_response");
+    }
+    const picked = String(answer.choice || "");
+    if (!picked) {
+      throw new JevApiError("Jev returned an empty choice for “" + field.wording + "”.", 200, "bad_response");
+    }
+    const criteria = (questions && questions[field.id] && questions[field.id].criteria) || {};
+    if (!(picked in criteria)) {
+      throw new JevApiError(
+        "Jev chose “" + picked + "” for “" + field.wording + "”, which was not an offered option.",
+        200,
+        "bad_response"
+      );
+    }
+  }
 }
 
 async function applyChoice(field, answer, profile, generation) {
@@ -648,7 +678,7 @@ function httpErrorMessage(status, apiError, provider) {
       provider.name +
       " says the account is out of credits (HTTP 402)." +
       (provider.id === "beatapi"
-        ? " Top up at beatapi.io/dashboard/billing, or check the model is jev-1.13-free."
+        ? " Top up at beatapi.io/dashboard/billing, or check the model is " + provider.model + "."
         : " Top up your balance to continue.") +
       detail
     );

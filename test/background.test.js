@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadBackground } = require("./helpers/background");
-const { answerFor, findOption, findField } = require("./fixtures/jev");
+const { loadBackground, jsonResponse, timeoutError } = require("./helpers/background");
+const { answerFor, errorBody, findOption, findField } = require("./fixtures/jev");
 
 const SIMPLE_FORM = `<!doctype html><title>Signup</title>
   <form id="signup">
@@ -283,4 +283,391 @@ test("status is broadcast to the popup and the page launcher", async () => {
   assert.ok(bg.broadcasts.some((m) => m.type === "STATE" && m.state.running));
   assert.ok(bg.broadcasts.some((m) => m.type === "STATE" && m.state.finished));
   assert.ok(bg.tabMessages.some((m) => m.type === "JEV_FAST_STATUS" && m.status.running));
+});
+
+
+function logTexts(state) {
+  return state.logs.map((l) => l.text);
+}
+
+function twoFieldForm() {
+  return `<!doctype html><title>Signup</title>
+  <form id="signup">
+    <label for="first">First name</label>
+    <input id="first" name="first" type="text" />
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" />
+  </form>`;
+}
+
+function profileWithAliasAndEmail() {
+  const storage = profileWithFirstName("Alex");
+  storage.jevProfile.slots[0].aliases = ["First name"];
+  storage.jevProfile.answers.push({
+    slotId: "slot_personal_email",
+    situationId: null,
+    value: "alex@example.com",
+    optionWordings: [],
+  });
+  return storage;
+}
+
+test("429 with Retry-After waits the advised time, then the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) {
+        return jsonResponse(429, errorBody(429, "rate_limit_exceeded", "Free tier: 1 request per minute"), {
+          "Retry-After": "37",
+        });
+      }
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true, JSON.stringify(logTexts(state)));
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.calls.length, 2);
+  assert.ok(bg.calls[1].at - bg.calls[0].at >= 37000);
+  assert.ok(logTexts(state).some((t) => /rate limit reached — waiting 37s/.test(t)));
+});
+
+test("529 waits and retries, then the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) {
+        return jsonResponse(529, errorBody(529, "overloaded", "Jev is busy"), { "Retry-After": "2" });
+      }
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.calls.length, 2);
+  assert.ok(logTexts(state).some((t) => /Jev is overloaded/.test(t)));
+});
+
+test("429 without Retry-After on BeatAPI waits the free-tier 60s", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) return jsonResponse(429, errorBody(429, "rate_limit_exceeded", "Too many requests"));
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.ok(bg.calls[1].at - bg.calls[0].at >= 60000);
+});
+
+test("429 retries are bounded (5 calls max) and end with a clear error", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(429, errorBody(429, "rate_limit_exceeded", "slow down"), { "Retry-After": "1" }),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.running, false);
+  assert.equal(state.finished, false);
+  assert.equal(bg.calls.length, 5);
+  assert.match(state.lastError, /still rate-limiting/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.equal(state.check, null);
+});
+
+test("5xx is retried once, then the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) return jsonResponse(503, errorBody(503, "unavailable", "upstream busy"));
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.equal(bg.calls.length, 2);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+});
+
+test("a second consecutive 5xx stops the fill after 2 calls and shows the request id", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(502, errorBody(502, "upstream_error", "model unavailable", { request_id: "req_abc123" })),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 2);
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /HTTP 502.*model unavailable.*Request ID: req_abc123/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.equal(state.check, null);
+});
+
+test("5xx marked retryable:false fails immediately", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(500, errorBody(500, "internal", "bad schema", { retryable: false })),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 1);
+  assert.match(state.lastError, /HTTP 500.*bad schema/);
+});
+
+for (const [status, pattern] of [
+  [401, /rejected this API key \(HTTP 401\)/],
+  [402, /out of credits \(HTTP 402\)\. Top up at beatapi\.io\/dashboard\/billing/],
+  [403, /refused the request \(HTTP 403\)/],
+  [404, /does not recognise model “jev-1\.14-free” \(HTTP 404\)/],
+  [400, /rejected the request \(HTTP 400\) \(questions\.field_0\.criteria is empty\)/],
+  [422, /rejected the request \(HTTP 422\)/],
+]) {
+  test("HTTP " + status + " is not retried and stops the fill", async () => {
+    const bg = loadBackground({
+      html: SIMPLE_FORM,
+      storage: profileWithFirstName("Alex"),
+      respond: () => jsonResponse(status, errorBody(status, "err_" + status, "questions.field_0.criteria is empty")),
+    });
+    await bg.fill();
+    const state = await bg.idle();
+    assert.equal(bg.calls.length, 1, "must not burn retries on HTTP " + status);
+    assert.equal(state.running, false);
+    assert.match(state.lastError, pattern);
+    assert.equal(bg.page.document.getElementById("first").value, "");
+    assert.equal(state.check, null);
+  });
+}
+
+test("network errors retry twice then fail with a readable message", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => {
+      throw new TypeError("Failed to fetch");
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 3);
+  assert.match(state.lastError, /Could not reach BeatAPI: Failed to fetch/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+});
+
+test("timeouts retry and then report the 12s limit", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => {
+      throw timeoutError();
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 3);
+  assert.match(state.lastError, /did not respond within 12s/);
+});
+
+test("a single transient timeout is recovered and the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) throw timeoutError();
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+});
+
+const malformed = [
+  ["no answers object", () => ({ id: "x", model: "jev-1.14-free" }), /without an answers object/],
+  ["non-JSON body", () => jsonResponse(200, undefined), /without an answers object/],
+  [
+    "answer not typed as choice",
+    (r) => {
+      const body = confidentFirstName(r);
+      const id = Object.keys(body.answers)[0];
+      body.answers[id] = { type: "text", text: "Alex" };
+      return body;
+    },
+    /did not return a typed Choice/,
+  ],
+  [
+    "hallucinated choice key",
+    (r) => {
+      const body = confidentFirstName(r);
+      const id = Object.keys(body.answers)[0];
+      body.answers[id] = { type: "choice", choice: "default:slot_not_real", confidence: 0.99 };
+      return body;
+    },
+    /was not an offered option/,
+  ],
+  [
+    "empty choice",
+    (r) => {
+      const body = confidentFirstName(r);
+      const id = Object.keys(body.answers)[0];
+      body.answers[id] = { type: "choice", choice: "", confidence: 0.99 };
+      return body;
+    },
+    /empty choice/,
+  ],
+];
+for (const [name, respond, pattern] of malformed) {
+  test("malformed response (" + name + ") stops the fill and writes nothing", async () => {
+    const bg = loadBackground({
+      html: SIMPLE_FORM,
+      storage: profileWithFirstName("Alex"),
+      respond,
+    });
+    await bg.fill();
+    const state = await bg.idle();
+    assert.equal(bg.calls.length, 1);
+    assert.equal(state.running, false);
+    assert.match(state.lastError, pattern);
+    assert.equal(bg.page.document.getElementById("first").value, "");
+    assert.equal(state.check, null);
+    assert.ok(!bg.tabMessages.some((m) => m.type === "WRITE_FIELD"));
+  });
+}
+
+test("Stop during a rate-limit wait cancels without further API calls", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(429, errorBody(429, "rate_limit_exceeded", "wait"), { "Retry-After": "60" }),
+  });
+  const filling = bg.fill();
+  await bg.waitFor((s) => s.waitingUntil > 0, "rate-limit wait");
+  const stopped = await bg.send({ type: "STOP" });
+  assert.equal(stopped.running, false);
+  await filling;
+  for (let i = 0; i < 200; i += 1) await new Promise((r) => setImmediate(r));
+  assert.equal(bg.calls.length, 1);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+});
+
+test("a response that arrives after Stop does not write", async () => {
+  let resolveFetch;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (r) =>
+      new Promise((resolve) => {
+        resolveFetch = () => resolve(confidentFirstName(r));
+      }),
+  });
+  const filling = bg.fill();
+  await bg.waitFor(() => bg.calls.length === 1, "fetch in flight");
+  await bg.send({ type: "STOP" });
+  resolveFetch();
+  await filling;
+  for (let i = 0; i < 200; i += 1) await new Promise((r) => setImmediate(r));
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.ok(!bg.tabMessages.some((m) => m.type === "WRITE_FIELD"));
+  const state = await bg.status();
+  assert.equal(state.running, false);
+  assert.equal(state.lastError, "");
+  assert.equal(state.check, null);
+});
+
+test("a failed call keeps local alias writes and opens no check", async () => {
+  const bg = loadBackground({
+    html: twoFieldForm(),
+    storage: profileWithAliasAndEmail(),
+    respond: () => jsonResponse(401, errorBody(401, "invalid_api_key", "bad key")),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "alias hit stays written");
+  assert.equal(bg.page.document.getElementById("email").value, "", "undecided field not written");
+  assert.equal(state.running, false);
+  assert.equal(state.check, null);
+  assert.match(state.lastError, /rejected this API key/);
+  assert.equal(bg.calls.length, 1);
+});
+
+test("scripting blocked by Chrome ends the fill with an explanation", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    scriptingError: "Cannot access contents of the page. Extension manifest must request permission.",
+    respond: () => assert.fail("must not call API"),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.match(state.lastError, /doesn't allow Jev to access this page/);
+  assert.equal(bg.calls.length, 0);
+});
+
+test("closing the tab mid-fill ends with an explanation", async () => {
+  let bgRef;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (r) => {
+      bgRef.closeTab();
+      return confidentFirstName(r);
+    },
+  });
+  bgRef = bg;
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /tab Jev was working on was closed/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+});
+
+test("a field in an open shadow root can be filled; the launcher is not a field", async () => {
+  const bg = loadBackground({
+    html: `<!doctype html><title>Shadow</title>
+      <form id="signup"><div id="shadow-host"></div></form>
+      <div id="jev-fast-launcher-root"></div>`,
+    storage: profileWithFirstName("Alex"),
+    respond: confidentFirstName,
+  });
+  const host = bg.page.document.getElementById("shadow-host");
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = `<label for="first">First name</label><input id="first" type="text" />`;
+
+  const launcher = bg.page.document.getElementById("jev-fast-launcher-root");
+  const launcherShadow = launcher.attachShadow({ mode: "open" });
+  launcherShadow.innerHTML = `<label for="fake">Launcher decoy</label><input id="fake" type="text" />`;
+
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true, JSON.stringify(logTexts(state)));
+  assert.equal(shadow.getElementById("first").value, "Alex");
+  assert.equal(launcherShadow.getElementById("fake").value, "");
+  const body = bg.calls[0].request;
+  assert.deepEqual(
+    body.state.fields.map((f) => f.wording),
+    ["First name"]
+  );
 });
