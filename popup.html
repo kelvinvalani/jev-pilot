@@ -14,8 +14,8 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5H12L11 22l8.5-11.5H12L13 2Z"/></svg>
           </span>
           <div class="brand-text">
-            <h1>Jev Fast</h1>
-            <p id="headerSub">Automate this page</p>
+            <h1>Jev Fill</h1>
+            <p id="headerSub">Fill this page</p>
           </div>
         </div>
         <div class="header-actions">
@@ -98,7 +98,7 @@
         </section>
 
         <!-- Main -->
-        <section id="mainView" class="view" aria-label="Task">
+        <section id="mainView" class="view" aria-label="Fill">
           <div id="setupCard" class="callout callout-info" hidden>
             <div>
               <p class="callout-title">Connect Jev to get started</p>
@@ -107,61 +107,19 @@
             <button id="setupBtn" class="btn btn-secondary btn-sm" type="button">Add key</button>
           </div>
 
-          <form id="taskForm" class="card composer" novalidate>
-            <label for="goal" class="composer-label">What should Jev do on this page?</label>
-            <textarea id="goal" rows="3" maxlength="2000" placeholder="e.g. Search for flights from Melbourne to Tokyo"></textarea>
-            <div class="examples" id="examples" aria-label="Examples">
-              <button type="button" class="chip" data-example="Search for flights from Melbourne to Tokyo">Flights Melbourne → Tokyo</button>
-              <button type="button" class="chip" data-example="Search for &quot;wireless headphones&quot;">Search “wireless headphones”</button>
-              <button type="button" class="chip" data-example="Click the sign in button">Click sign in</button>
-            </div>
+          <div id="fillCard" class="card composer">
+            <p class="composer-label">Write your profile into the empty fields of this page’s form.</p>
             <div class="composer-foot">
-              <span id="goalCount" class="muted small">0 / 2000</span>
-              <button id="startBtn" class="btn btn-primary" type="submit">
+              <button id="fillBtn" class="btn btn-primary" type="button">
                 <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.9l10-6.5a1 1 0 0 0 0-1.8l-10-6.5A1 1 0 0 0 8 5.5Z"/></svg>
-                Run
+                Fill
               </button>
+              <button id="stopBtn" class="btn btn-danger btn-sm" type="button" hidden>Stop</button>
             </div>
             <p id="formError" class="form-error" role="alert" hidden></p>
-          </form>
-
-          <section id="runCard" class="card run-card" aria-live="polite" hidden>
-            <div class="run-head">
-              <div class="run-goal">
-                <p class="eyebrow">Working on</p>
-                <p id="runGoal" class="run-goal-text"></p>
-              </div>
-              <button id="stopBtn" class="btn btn-danger btn-sm" type="button">
-                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-                Stop
-              </button>
-            </div>
-            <div class="progress" role="progressbar" aria-label="Steps used" aria-valuemin="0" aria-valuemax="15" aria-valuenow="0" id="progress">
-              <span id="progressBar"></span>
-            </div>
             <p id="runMeta" class="muted small"></p>
             <p id="waitNotice" class="wait-notice" hidden></p>
-          </section>
-
-          <section id="confirmCard" class="card review-card" role="group" aria-labelledby="confirmTitle" hidden>
-            <p class="eyebrow eyebrow-warn">Needs your OK</p>
-            <h3 id="confirmTitle">Review this step</h3>
-            <p id="confirmText" class="review-text"></p>
-            <div class="proposal">
-              <span id="confirmAction" class="action-badge">CLICK</span>
-              <span id="confirmTarget" class="proposal-target"></span>
-              <span id="confirmConfidence" class="confidence-tag"></span>
-            </div>
-            <div id="confirmTextRow" class="field" hidden>
-              <label for="confirmInput">Text to type</label>
-              <input id="confirmInput" type="text" placeholder="Enter the text Jev should type" />
-            </div>
-            <div class="button-row">
-              <button id="confirmBtn" class="btn btn-primary" type="button">Run this step</button>
-              <button id="skipBtn" class="btn btn-secondary" type="button">Skip</button>
-              <button id="confirmStopBtn" class="btn btn-ghost" type="button">Stop task</button>
-            </div>
-          </section>
+          </div>
 
           <section id="resultCard" class="callout" role="status" hidden>
             <span id="resultIcon" class="callout-icon" aria-hidden="true"></span>
@@ -182,15 +140,15 @@
             <ol id="timeline" class="timeline" role="log" aria-live="polite"></ol>
             <div id="emptyLog" class="empty">
               <p class="empty-title">No activity yet</p>
-              <p class="empty-text">Describe a task and press Run. Each step shows what Jev did, how confident it was, and how long it took.</p>
+              <p class="empty-text">Press Fill to write your profile into the form on this page.</p>
             </div>
           </section>
         </main>
 
       <footer class="footer">
-        <span>Up to 15 steps</span>
+        <span>One form per click</span>
         <span aria-hidden="true">·</span>
-        <span>Asks before acting below 60% confidence</span>
+        <span>You submit the form yourself</span>
       </footer>
     </div>
     <script src="popup.js"></script>

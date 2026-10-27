@@ -282,7 +282,7 @@
     if (!message || message.type !== "JEV_FAST_STATUS" || !message.status) return;
     const status = message.status;
     let next = "idle";
-    if (status.running && status.paused) next = "paused";
+    if (status.running && (status.check || status.paused)) next = "paused";
     else if (status.running) next = "running";
     else if (status.error) next = "error";
     layer.dataset.status = next;

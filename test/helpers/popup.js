@@ -10,22 +10,20 @@ const { read } = require("./page");
 function baseState(extra) {
   return {
     running: false,
-    paused: false,
     finished: false,
     lastError: "",
-    step: 0,
-    maxSteps: 15,
-    confidenceThreshold: 0.6,
-    goal: "",
+    check: null,
+    undoAvailable: false,
+    openSettings: false,
+    confidenceThreshold: 0.85,
     provider: "beatapi",
     providerName: "BeatAPI",
     model: "jev-1.14-free",
-    tabTitle: "Northwind Flights",
-    tabUrl: "https://flights.example.test/",
+    tabTitle: "Signup",
+    tabUrl: "https://forms.example.test/signup",
     waitingUntil: 0,
     waitReason: "",
     logs: [],
-    pendingConfirmation: null,
     ...(extra || {}),
   };
 }
@@ -78,40 +76,45 @@ function loadPopup(options) {
       },
     };
   }
-  if (surface === "overlay") {
-    Object.defineProperty(window, "parent", {
-      configurable: true,
-      value: { postMessage: (data, origin) => parentMessages.push({ data, origin }) },
-    });
-  }
-  window.close = () => parentMessages.push({ data: "window.close" });
+
+  window.parent = {
+    postMessage(data, origin) {
+      parentMessages.push({ data, origin });
+    },
+  };
 
   window.eval(read("popup.js") + "\n//# sourceURL=popup.js");
 
-  const $ = (id) => window.document.getElementById(id);
   return {
     window,
     document: window.document,
-    $,
-    sent,
     storage,
+    sent,
     parentMessages,
-    push(next) {
-      state = baseState(next);
-      for (const fn of listeners) fn({ type: "STATE", state: JSON.parse(JSON.stringify(state)) });
+    $(id) {
+      return window.document.getElementById(id);
     },
-    async settle(ticks) {
-      for (let i = 0; i < (ticks || 20); i += 1) await new Promise((r) => setImmediate(r));
+    visible(id) {
+      const el = window.document.getElementById(id);
+      return Boolean(el && !el.hidden);
     },
-    async sleep(ms) {
-      await new Promise((r) => setTimeout(r, ms));
+    click(id) {
+      window.document.getElementById(id).click();
     },
-    visible: (id) => !$(id).hidden,
-    click: (id) => $(id).click(),
     type(id, value) {
-      const el = $(id);
+      const el = window.document.getElementById(id);
       el.value = value;
       el.dispatchEvent(new window.Event("input", { bubbles: true }));
+    },
+    push(extra) {
+      state = baseState({ ...state, ...extra });
+      for (const fn of listeners) fn({ type: "STATE", state: JSON.parse(JSON.stringify(state)) });
+    },
+    settle() {
+      return new Promise((r) => setImmediate(r));
+    },
+    sleep(ms) {
+      return new Promise((r) => setTimeout(r, ms));
     },
   };
 }
