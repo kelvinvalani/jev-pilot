@@ -98,3 +98,26 @@ test("does not respond to background LIST_FORM messages", async () => {
   const res = await l.page.deliver({ type: "LIST_FORM" });
   assert.equal(res, undefined);
 });
+
+test("captures the focused element at pointerdown before the button takes focus", async () => {
+  const page = createPage({
+    html: `<!doctype html><title>Focus</title>
+      <label for="first">First name</label>
+      <input id="first" type="text" />`,
+    inject: ["launcher.js"],
+  });
+  const input = page.document.getElementById("first");
+  input.focus();
+  assert.equal(page.document.activeElement, input);
+
+  const messages = [];
+  page.window.chrome.runtime.sendMessage = (message) => {
+    messages.push(message);
+  };
+
+  const host = page.document.getElementById("jev-fast-launcher-root");
+  const button = host.shadowRoot.querySelector(".launcher");
+  button.dispatchEvent(new page.window.PointerEvent("pointerdown", { bubbles: true, composed: true }));
+
+  assert.ok(messages.some((m) => m.type === "FOCUS_CAPTURE" && m.focusedSelector === "#first"));
+});

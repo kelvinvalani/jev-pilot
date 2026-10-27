@@ -101,6 +101,7 @@ const ui = {
   saveTimer: 0,
   savedTimer: 0,
   checkFieldId: "",
+  focusedSelector: null,
 };
 
 document.documentElement.classList.add("surface-" + SURFACE);
@@ -486,8 +487,30 @@ els.fillBtn.addEventListener("click", async () => {
   ui.localError = "";
   persistSettings();
   const endpoint = els.testEndpoint.value.trim();
-  await command({ type: "FILL", apiKey, provider: selectedProvider(), ...(endpoint ? { endpoint } : {}) });
+  const fillMessage = {
+    type: "FILL",
+    apiKey,
+    provider: selectedProvider(),
+    ...(endpoint ? { endpoint } : {}),
+  };
+  if (ui.focusedSelector) fillMessage.focusedSelector = ui.focusedSelector;
+  await command(fillMessage);
 });
+
+if (SURFACE === "overlay" && window.parent && window.parent !== window) {
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || data.source !== "jev-fast-launcher") return;
+    if (data.type === "FOCUS_CAPTURE") {
+      ui.focusedSelector = data.focusedSelector || null;
+    }
+  });
+  try {
+    window.parent.postMessage({ source: "jev-fast", type: "GET_FOCUS_CAPTURE" }, "*");
+  } catch {
+    // Cross-origin hosts are ignored; FOCUS_CAPTURE via the service worker still applies.
+  }
+}
 
 els.stopBtn.addEventListener("click", () => command({ type: "STOP" }));
 els.checkSlot.addEventListener("change", () => {

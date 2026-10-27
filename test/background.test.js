@@ -625,3 +625,237 @@ test("a second fill is refused while one is in progress", async () => {
   assert.match(state.lastError, /already in progress/i);
   assert.ok((await bg.status()).check, "original check remains");
 });
+
+function profileWithEmail(answer) {
+  const storage = profileWithFirstName("Alex");
+  storage.jevProfile.answers.push({
+    slotId: "slot_personal_email",
+    situationId: null,
+    value: answer,
+    optionWordings: [],
+  });
+  storage.jevProfile.slots.find((s) => s.id === "slot_personal_email").aliases = ["Email", "Personal email"];
+  return storage;
+}
+
+function profileWithCity(answer) {
+  const storage = profileWithFirstName("Alex");
+  storage.jevProfile.answers.push({
+    slotId: "slot_city",
+    situationId: null,
+    value: answer,
+    optionWordings: [],
+  });
+  storage.jevProfile.slots.find((s) => s.id === "slot_city").aliases = ["City"];
+  return storage;
+}
+
+function answerAllConfident(request) {
+  const answers = {};
+  const fields = (request.state && request.state.fields) || [];
+  for (const field of fields) {
+    let option = "none";
+    if (/first name/i.test(field.wording)) option = findOption(request, /legal first name.*default/i);
+    else if (/email/i.test(field.wording)) option = findOption(request, /personal email.*default/i);
+    else if (/city/i.test(field.wording)) option = findOption(request, /city.*default/i);
+    const q = request.questions[field.id];
+    const probabilities = { [option]: option === "none" ? 0.9 : 0.95 };
+    if (q && q.criteria) {
+      for (const key of Object.keys(q.criteria)) {
+        if (!(key in probabilities)) probabilities[key] = 0;
+      }
+    }
+    answers[field.id] = {
+      type: "choice",
+      choice: option,
+      confidence: option === "none" ? 0.9 : 0.95,
+      probabilities,
+    };
+  }
+  return {
+    id: "sys1_mock_form",
+    object: "systemone.response",
+    model: request.model,
+    created: 1790000000,
+    answers,
+    usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    latency_ms: 10,
+  };
+}
+
+test("a focused field inside a form tag fills that tag and leaves a second form alone", async () => {
+  const html = `<!doctype html><title>Two forms</title>
+    <form id="checkout">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>
+    <form id="newsletter">
+      <label for="list">Email</label>
+      <input id="list" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithEmail("alex@example.com"),
+    respond: answerAllConfident,
+  });
+  await bg.fill({ focusedSelector: "#email" });
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("email").value, "alex@example.com");
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "same form may also fill");
+  assert.equal(bg.page.document.getElementById("list").value, "", "second form left alone");
+});
+
+test("a focused field outside any form tag fills the visual group under its nearest heading", async () => {
+  const html = `<!doctype html><title>Sections</title>
+    <h2>Shipping</h2>
+    <label for="city">City</label>
+    <input id="city" type="text" />
+    <label for="first">First name</label>
+    <input id="first" type="text" />
+    <h2>Newsletter</h2>
+    <label for="email">Email</label>
+    <input id="email" type="email" />`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithCity("Sydney"),
+    respond: answerAllConfident,
+  });
+  await bg.fill({ focusedSelector: "#city" });
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("city").value, "Sydney");
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "same heading group may also fill");
+  assert.equal(bg.page.document.getElementById("email").value, "", "other heading group left alone");
+});
+
+test("a focused field with no heading fills the fields that share its parent", async () => {
+  const html = `<!doctype html><title>Parents</title>
+    <div id="group-a">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+      <label for="city">City</label>
+      <input id="city" type="text" />
+    </div>
+    <div id="group-b">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </div>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithCity("Melbourne"),
+    respond: answerAllConfident,
+  });
+  await bg.fill({ focusedSelector: "#city" });
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("city").value, "Melbourne");
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "same parent may also fill");
+  assert.equal(bg.page.document.getElementById("email").value, "", "sibling parent left alone");
+});
+
+test("with nothing focused, the fill chooses the form tag with the most empty fields", async () => {
+  const html = `<!doctype html><title>Most empty</title>
+    <form id="small">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>
+    <form id="large">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+      <label for="city">City</label>
+      <input id="city" type="text" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "", "smaller form left alone");
+});
+
+test("with nothing focused and no form tag, the fill chooses the largest visual group", async () => {
+  const html = `<!doctype html><title>Largest group</title>
+    <h2>Tiny</h2>
+    <label for="email">Email</label>
+    <input id="email" type="email" />
+    <h2>Big</h2>
+    <label for="first">First name</label>
+    <input id="first" type="text" />
+    <label for="city">City</label>
+    <input id="city" type="text" />`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "", "smaller visual group left alone");
+});
+
+test("a tie goes to the first form in tree order", async () => {
+  const html = `<!doctype html><title>Tie</title>
+    <form id="first-form">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+    </form>
+    <form id="second-form">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "", "later tied form left alone");
+});
+
+test("a field that already has a value is left as it is", async () => {
+  const html = `<!doctype html><title>Occupied</title>
+    <form>
+      <label for="first">First name</label>
+      <input id="first" type="text" value="Sam" />
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithEmail("alex@example.com"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Sam", "occupied field unchanged");
+  assert.equal(bg.page.document.getElementById("email").value, "alex@example.com");
+});
+
+test("FOCUS_CAPTURE from the page is used when FILL omits focusedSelector", async () => {
+  const html = `<!doctype html><title>Capture</title>
+    <form id="checkout">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+    </form>
+    <form id="newsletter">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.send({ type: "FOCUS_CAPTURE", focusedSelector: "#first" }, { tab: { id: bg.tab.id } });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "");
+  assert.ok(bg.tabMessages.some((m) => m.type === "LIST_FORM" && m.focusedSelector === "#first"));
+});
