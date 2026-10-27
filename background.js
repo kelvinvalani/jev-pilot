@@ -204,10 +204,14 @@ async function runFill(generation) {
   }
 
   const undecided = [];
+  const pendingChecks = [];
   for (const field of fields) {
     const local = matchAlias(profile, field);
-    if (local && local.answer != null) {
-      await writeAndRemember(field, local.answer, generation);
+    if (local && local.answer) {
+      const outcome = await writeStoredAnswer(field, local.answer, generation);
+      if (outcome === "check") {
+        pendingChecks.push(buildCheck(field, local.slot, local.situationId, outcomeReason(field, local.answer)));
+      }
       continue;
     }
     if (local && local.answer == null) {
@@ -217,6 +221,9 @@ async function runFill(generation) {
   }
 
   if (!undecided.length) {
+    await saveProfile(profile);
+    if (!isCurrent(generation)) return;
+    if (openNextCheck(pendingChecks)) return;
     finishFill("Filled from aliases.");
     return;
   }
@@ -230,11 +237,13 @@ async function runFill(generation) {
   for (const field of undecided) {
     if (!isCurrent(generation)) return;
     const answer = payload.answers && payload.answers[field.id];
-    await applyChoice(field, answer, profile, generation);
+    const check = await applyChoice(field, answer, profile, generation);
+    if (check) pendingChecks.push(check);
   }
 
   await saveProfile(profile);
   if (!isCurrent(generation)) return;
+  if (openNextCheck(pendingChecks)) return;
   finishFill("Fill complete.");
 }
 
@@ -243,31 +252,129 @@ async function applyChoice(field, answer, profile, generation) {
   const picked = answer && answer.type === "choice" ? String(answer.choice || "") : "";
   if (!picked || picked === "none" || confidence < CONFIDENCE_THRESHOLD) {
     // Checks open in a later ticket; confident writes are this ticket's scope.
-    return;
+    return null;
   }
   const parsed = parseOptionKey(picked);
-  if (!parsed || parsed.kind === "new") return;
+  if (!parsed || parsed.kind === "new") return null;
   const slot = profile.slots.find((s) => s.id === parsed.slotId);
-  if (!slot) return;
+  if (!slot) return null;
   const stored = findAnswer(profile, parsed.slotId, parsed.situationId);
-  if (!stored) return;
-  await writeAndRemember(field, stored.value, generation);
+  if (!stored) return null;
+  const outcome = await writeStoredAnswer(field, stored, generation);
+  if (outcome === "check") {
+    return buildCheck(field, slot, parsed.situationId, outcomeReason(field, stored));
+  }
   addAlias(slot, field.wording);
   if (parsed.kind === "situation" && parsed.situationId && field.headingWording) {
     const situation = profile.situations.find((s) => s.id === parsed.situationId);
     if (situation) addAlias(situation, field.headingWording);
   }
+  return null;
 }
 
-async function writeAndRemember(field, value, generation) {
-  if (!isCurrent(generation)) return;
+/**
+ * Writes a stored answer into a field. Dropdowns and radios are matched on this
+ * machine from the answer string and option wordings. Returns "written",
+ * "check", or "skipped".
+ */
+async function writeStoredAnswer(field, answerRecord, generation) {
+  if (!isCurrent(generation) || !answerRecord) return "skipped";
+  const value = answerRecord.value == null ? "" : String(answerRecord.value);
+
+  if (field.kind === "date" && !isIsoDate(value)) {
+    log("warn", "Date control needs YYYY-MM-DD for “" + field.wording + "”.");
+    return "check";
+  }
+
+  if (field.kind === "select" || field.kind === "radio") {
+    const matchedLabel = matchOptionLabel(field, answerRecord);
+    if (!matchedLabel) {
+      log("warn", "No option matched “" + field.wording + "”.");
+      return "check";
+    }
+    const result = await sendToTab(session.tabId, {
+      type: "WRITE_FIELD",
+      fieldId: field.id,
+      value: matchedLabel,
+    });
+    if (!isCurrent(generation)) return "skipped";
+    if (!result || !result.ok) {
+      log("warn", "Could not write “" + field.wording + "”.");
+      return "check";
+    }
+    rememberOptionWording(answerRecord, result.selectedLabel || matchedLabel);
+    log("system", "Wrote “" + (result.selectedLabel || matchedLabel) + "” into " + field.wording + ".", {
+      kind: "write",
+    });
+    return "written";
+  }
+
   const result = await sendToTab(session.tabId, { type: "WRITE_FIELD", fieldId: field.id, value });
-  if (!isCurrent(generation)) return;
+  if (!isCurrent(generation)) return "skipped";
   if (!result || !result.ok) {
     log("warn", "Could not write “" + field.wording + "”.");
-    return;
+    return "check";
   }
   log("system", "Wrote “" + value + "” into " + field.wording + ".", { kind: "write" });
+  return "written";
+}
+
+function matchOptionLabel(field, answerRecord) {
+  const candidates = [answerRecord.value]
+    .concat(answerRecord.optionWordings || [])
+    .map(compareKey)
+    .filter(Boolean);
+  if (!candidates.length) return null;
+  for (const label of field.options || []) {
+    if (candidates.includes(compareKey(label))) return label;
+  }
+  return null;
+}
+
+function rememberOptionWording(answerRecord, label) {
+  const text = String(label || "").trim();
+  if (!text || !answerRecord) return;
+  const key = compareKey(text);
+  const existing = (answerRecord.optionWordings || []).map(compareKey);
+  if (existing.includes(key)) return;
+  answerRecord.optionWordings = (answerRecord.optionWordings || []).concat([text]);
+}
+
+function isIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function outcomeReason(field, answerRecord) {
+  if (field.kind === "date" && !isIsoDate(answerRecord && answerRecord.value)) return "bad_date";
+  if ((field.kind === "select" || field.kind === "radio") && !matchOptionLabel(field, answerRecord)) {
+    return "unmatched_option";
+  }
+  return "rejected";
+}
+
+function buildCheck(field, slot, situationId, reason) {
+  const needsOption = field.kind === "select" || field.kind === "radio";
+  return {
+    fieldId: field.id,
+    wording: field.wording,
+    headingWording: field.headingWording || "",
+    kind: field.kind || "text",
+    slotId: slot ? slot.id : null,
+    situationId: situationId == null ? null : situationId,
+    optionRequired: needsOption,
+    optionLabels: needsOption ? (field.options || []).slice() : [],
+    reason: reason || "",
+  };
+}
+
+function openNextCheck(pendingChecks) {
+  if (!pendingChecks || !pendingChecks.length) return false;
+  session.check = pendingChecks[0];
+  session.running = true;
+  session.finished = false;
+  log("info", "Check waiting for “" + session.check.wording + "”.", { kind: "check" });
+  broadcast();
+  return true;
 }
 
 function matchAlias(profile, field) {
@@ -278,13 +385,13 @@ function matchAlias(profile, field) {
     const heading = compareKey(field.headingWording);
     if (!heading) {
       const answer = findAnswer(profile, slot.id, null);
-      return { slot, situationId: null, answer: answer ? answer.value : null };
+      return { slot, situationId: null, answer: answer || null };
     }
     for (const situation of profile.situations) {
       const situationNames = [situation.name].concat(situation.aliases || []).map(compareKey);
       if (!situationNames.includes(heading)) continue;
       const answer = findAnswer(profile, slot.id, situation.id);
-      return { slot, situationId: situation.id, answer: answer ? answer.value : null };
+      return { slot, situationId: situation.id, answer: answer || null };
     }
     return { slot, situationId: undefined, answer: undefined };
   }
@@ -406,7 +513,14 @@ async function loadProfile() {
   return {
     slots: stored.slots.slice(),
     situations: Array.isArray(stored.situations) ? stored.situations.slice() : [],
-    answers: Array.isArray(stored.answers) ? stored.answers.slice() : [],
+    answers: Array.isArray(stored.answers)
+      ? stored.answers.map((a) => ({
+          slotId: a.slotId,
+          situationId: a.situationId == null ? null : a.situationId,
+          value: a.value == null ? "" : String(a.value),
+          optionWordings: Array.isArray(a.optionWordings) ? a.optionWordings.slice() : [],
+        }))
+      : [],
   };
 }
 
