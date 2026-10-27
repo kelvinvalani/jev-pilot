@@ -20,12 +20,35 @@ declare -A ISSUE_STATUS=(
   [12]="Ready"          # 08 failed call
 )
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ISSUES_DIR="$ROOT/.scratch/fill/issues"
+
+# Map GitHub issue number → ticket file (docs live on main)
+declare -A ISSUE_FILE=(
+  [5]="01-confident-text-fill.md"
+  [6]="02-one-form.md"
+  [7]="03-check-skip-stop-mint.md"
+  [8]="04-situational-answers.md"
+  [9]="05-options-on-the-machine.md"
+  [10]="06-undo.md"
+  [11]="07-repair-the-profile.md"
+  [12]="08-failed-call.md"
+)
+
 echo "Checking project scope…"
 if ! gh auth status -a 2>&1 | grep -Eqi 'project'; then
   echo "This token needs the project scope. Run:"
   echo "  gh auth refresh -s project,read:project"
   exit 1
 fi
+
+echo "Syncing issue bodies from $ISSUES_DIR…"
+for issue in 5 6 7 8 9 10 11 12; do
+  file="$ISSUES_DIR/${ISSUE_FILE[$issue]}"
+  body=$(printf '%s\n\n---\nSource: `%s`\nWorkstream: Jev Fill\n' "$(cat "$file")" ".scratch/fill/issues/${ISSUE_FILE[$issue]}")
+  gh issue edit "$issue" -R "$REPO" --body "$body" >/dev/null
+  echo "  #$issue ← ${ISSUE_FILE[$issue]}"
+done
 
 echo "Creating project “$TITLE” for @$OWNER…"
 PROJECT_JSON=$(gh project create --owner "$OWNER" --title "$TITLE" --format json)
