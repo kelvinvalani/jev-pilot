@@ -12,11 +12,11 @@ TITLE="${TITLE:-Jev Fill}"
 declare -A ISSUE_STATUS=(
   [5]="Done"            # 01 confident text fill
   [6]="Ready"           # 02 one form
-  [7]="Todo"            # 03 check/skip/stop/mint (needs restore)
-  [8]="Todo"            # 04 situational answers
-  [9]="Todo"            # 05 options on the machine
-  [10]="Todo"           # 06 undo
-  [11]="Todo"           # 07 repair the profile
+  [7]="Ready"           # 03 check/skip/stop/mint
+  [8]="Ready"           # 04 situational answers (blocked by 01 in ticket text; pull after 03)
+  [9]="Ready"           # 05 options on the machine
+  [10]="Ready"          # 06 undo
+  [11]="Ready"          # 07 repair the profile
   [12]="Ready"          # 08 failed call
 )
 
