@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadBackground } = require("./helpers/background");
-const { answerFor, findOption, findField } = require("./fixtures/jev");
+const { loadBackground, jsonResponse, timeoutError } = require("./helpers/background");
+const { answerFor, errorBody, findOption, findField } = require("./fixtures/jev");
 
 const SIMPLE_FORM = `<!doctype html><title>Signup</title>
   <form id="signup">
@@ -283,6 +283,967 @@ test("status is broadcast to the popup and the page launcher", async () => {
   assert.ok(bg.broadcasts.some((m) => m.type === "STATE" && m.state.running));
   assert.ok(bg.broadcasts.some((m) => m.type === "STATE" && m.state.finished));
   assert.ok(bg.tabMessages.some((m) => m.type === "JEV_FAST_STATUS" && m.status.running));
+});
+
+const TWO_FIELD_FORM = `<!doctype html><title>Signup</title>
+  <form id="signup">
+    <label for="first">First name</label>
+    <input id="first" name="first" type="text" />
+    <label for="nickname">Nickname</label>
+    <input id="nickname" name="nickname" type="text" />
+  </form>`;
+
+function answersForFields(request, decisions) {
+  const answers = {};
+  for (const [pattern, decision] of decisions) {
+    const fieldId = findField(request, pattern);
+    const option =
+      decision.option === "none"
+        ? "none"
+        : decision.option || findOption(request, decision.optionPattern || /legal first name.*default/i);
+    answers[fieldId] = {
+      type: "choice",
+      choice: option,
+      confidence: decision.confidence == null ? 0.95 : decision.confidence,
+      probabilities: { [option]: decision.confidence == null ? 0.95 : decision.confidence },
+    };
+  }
+  for (const id of Object.keys(request.questions)) {
+    if (!answers[id]) {
+      answers[id] = { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } };
+    }
+  }
+  return {
+    id: "sys1_mock_multi",
+    object: "systemone.response",
+    model: request.model,
+    created: 1790000100,
+    answers,
+    usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+    latency_ms: 40,
+  };
+}
+
+test("a low-confidence choice opens a check after confident writes, in page order", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      const firstOpt = findOption(request, /legal first name.*default/i);
+      return {
+        id: "sys1_mock_order",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000200,
+        answers: {
+          [first]: { type: "choice", choice: firstOpt, confidence: 0.95, probabilities: { [firstOpt]: 0.95 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  const state = await bg.idle();
+
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("nickname").value, "");
+  assert.equal(state.running, true);
+  assert.ok(state.check);
+  assert.equal(state.check.wording, "Nickname");
+  assert.equal(state.check.proposedSlotName, "Nickname");
+  assert.ok(Array.isArray(state.check.slots));
+  assert.ok(state.check.slots.some((s) => s.name === "legal first name"));
+  const blob = JSON.stringify(state);
+  assert.ok(!blob.includes("sk-mock"), "API key must stay out of status");
+});
+
+test("saving a check settles the slot and answer, then writes the field", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      const firstOpt = findOption(request, /legal first name.*default/i);
+      return {
+        id: "sys1_mock_save",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000300,
+        answers: {
+          [first]: { type: "choice", choice: firstOpt, confidence: 0.95, probabilities: { [firstOpt]: 0.95 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  assert.equal((await bg.status()).check.wording, "Nickname");
+
+  await bg.send({
+    type: "RESOLVE_CHECK",
+    slotId: "slot_legal_first_name",
+    answer: "Ace",
+  });
+  const state = await bg.idle();
+  assert.equal(state.check, null);
+  assert.equal(state.finished, true);
+  assert.equal(bg.page.document.getElementById("nickname").value, "Ace");
+  const slot = bg.storage.jevProfile.slots.find((s) => s.id === "slot_legal_first_name");
+  assert.ok(slot.aliases.map((a) => a.toLowerCase()).includes("nickname"));
+  const answer = bg.storage.jevProfile.answers.find(
+    (a) => a.slotId === "slot_legal_first_name" && a.situationId === null
+  );
+  assert.equal(answer.value, "Ace");
+});
+
+test("minting uses the field wording as the slot name and first alias", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM.replace("First name", "Loyalty number").replace('id="first"', 'id="loyalty"').replace('for="first"', 'for="loyalty"'),
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /Loyalty number/);
+      return {
+        id: "sys1_mock_mint",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000400,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  const check = (await bg.status()).check;
+  assert.equal(check.wording, "Loyalty number");
+  assert.equal(check.proposedSlotName, "Loyalty number");
+
+  await bg.send({ type: "RESOLVE_CHECK", mintName: "Loyalty number", answer: "L-42" });
+  await bg.idle();
+
+  assert.equal(bg.page.document.getElementById("loyalty").value, "L-42");
+  const minted = bg.storage.jevProfile.slots.find((s) => s.name === "Loyalty number");
+  assert.ok(minted, "minted slot exists");
+  assert.ok(minted.aliases.includes("Loyalty number"));
+  const answer = bg.storage.jevProfile.answers.find((a) => a.slotId === minted.id && a.situationId === null);
+  assert.equal(answer.value, "L-42");
+});
+
+test("the person can edit the minted slot name before save", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM.replace("First name", "Loyalty number").replace('id="first"', 'id="loyalty"').replace('for="first"', 'for="loyalty"'),
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /Loyalty number/);
+      return {
+        id: "sys1_mock_mint_edit",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000410,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  await bg.send({ type: "RESOLVE_CHECK", mintName: "shop loyalty id", answer: "L-99" });
+  await bg.idle();
+
+  const minted = bg.storage.jevProfile.slots.find((s) => s.name === "shop loyalty id");
+  assert.ok(minted);
+  assert.ok(minted.aliases.includes("Loyalty number"));
+  assert.equal(bg.page.document.getElementById("loyalty").value, "L-99");
+});
+
+test("skip leaves the field blank, stores nothing, and opens the next check", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      return {
+        id: "sys1_mock_skip",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000500,
+        answers: {
+          [first]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  let state = await bg.idle();
+  assert.equal(state.check.wording, "First name");
+
+  await bg.send({ type: "SKIP" });
+  state = await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.equal(state.check.wording, "Nickname");
+  assert.equal(bg.storage.jevProfile.answers.length, 1, "skip stores nothing new");
+});
+
+test("a skipped field is asked again on a later fill", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /First name/);
+      return {
+        id: "sys1_mock_skip_later",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000600,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  await bg.send({ type: "SKIP" });
+  await bg.idle();
+  assert.equal((await bg.status()).finished, true);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  const callsAfterSkip = bg.calls.length;
+
+  await bg.fill();
+  const state = await bg.idle();
+  assert.ok(state.check);
+  assert.equal(state.check.wording, "First name");
+  assert.equal(bg.calls.length, callsAfterSkip + 1);
+});
+
+test("stop ends remaining checks while keeping writes already made", async () => {
+  const bg = loadBackground({
+    html: TWO_FIELD_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const first = findField(request, /First name/);
+      const nick = findField(request, /Nickname/);
+      const firstOpt = findOption(request, /legal first name.*default/i);
+      return {
+        id: "sys1_mock_stop",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000700,
+        answers: {
+          [first]: { type: "choice", choice: firstOpt, confidence: 0.95, probabilities: { [firstOpt]: 0.95 } },
+          [nick]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.ok((await bg.status()).check);
+
+  await bg.send({ type: "STOP" });
+  const state = await bg.status();
+  assert.equal(state.running, false);
+  assert.equal(state.check, null);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("nickname").value, "");
+});
+
+test("a choice below 0.85 opens a check even when a slot was picked", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /First name/);
+      const option = findOption(request, /legal first name.*default/i);
+      return answerFor(request, { fieldId, option, confidence: 0.84 });
+    },
+  });
+
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.ok(state.check);
+  assert.equal(state.check.wording, "First name");
+  assert.equal(state.check.preSelectedSlotId, "slot_legal_first_name");
+});
+
+test("a second fill is refused while one is in progress", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond(request) {
+      const fieldId = findField(request, /First name/);
+      return {
+        id: "sys1_mock_busy",
+        object: "systemone.response",
+        model: request.model,
+        created: 1790000800,
+        answers: {
+          [fieldId]: { type: "choice", choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        latency_ms: 20,
+      };
+    },
+  });
+
+  await bg.fill();
+  await bg.idle();
+  assert.ok((await bg.status()).check);
+
+  const state = await bg.fill();
+  assert.match(state.lastError, /already in progress/i);
+  assert.ok((await bg.status()).check, "original check remains");
+});
+
+function profileWithEmail(answer) {
+  const storage = profileWithFirstName("Alex");
+  storage.jevProfile.answers.push({
+    slotId: "slot_personal_email",
+    situationId: null,
+    value: answer,
+    optionWordings: [],
+  });
+  storage.jevProfile.slots.find((s) => s.id === "slot_personal_email").aliases = ["Email", "Personal email"];
+  return storage;
+}
+
+function profileWithCity(answer) {
+  const storage = profileWithFirstName("Alex");
+  storage.jevProfile.answers.push({
+    slotId: "slot_city",
+    situationId: null,
+    value: answer,
+    optionWordings: [],
+  });
+  storage.jevProfile.slots.find((s) => s.id === "slot_city").aliases = ["City"];
+  return storage;
+}
+
+function answerAllConfident(request) {
+  const answers = {};
+  const fields = (request.state && request.state.fields) || [];
+  for (const field of fields) {
+    let option = "none";
+    if (/first name/i.test(field.wording)) option = findOption(request, /legal first name.*default/i);
+    else if (/email/i.test(field.wording)) option = findOption(request, /personal email.*default/i);
+    else if (/city/i.test(field.wording)) option = findOption(request, /city.*default/i);
+    const q = request.questions[field.id];
+    const probabilities = { [option]: option === "none" ? 0.9 : 0.95 };
+    if (q && q.criteria) {
+      for (const key of Object.keys(q.criteria)) {
+        if (!(key in probabilities)) probabilities[key] = 0;
+      }
+    }
+    answers[field.id] = {
+      type: "choice",
+      choice: option,
+      confidence: option === "none" ? 0.9 : 0.95,
+      probabilities,
+    };
+  }
+  return {
+    id: "sys1_mock_form",
+    object: "systemone.response",
+    model: request.model,
+    created: 1790000000,
+    answers,
+    usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    latency_ms: 10,
+  };
+}
+
+test("a focused field inside a form tag fills that tag and leaves a second form alone", async () => {
+  const html = `<!doctype html><title>Two forms</title>
+    <form id="checkout">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>
+    <form id="newsletter">
+      <label for="list">Email</label>
+      <input id="list" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithEmail("alex@example.com"),
+    respond: answerAllConfident,
+  });
+  await bg.fill({ focusedSelector: "#email" });
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("email").value, "alex@example.com");
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "same form may also fill");
+  assert.equal(bg.page.document.getElementById("list").value, "", "second form left alone");
+});
+
+test("a focused field outside any form tag fills the visual group under its nearest heading", async () => {
+  const html = `<!doctype html><title>Sections</title>
+    <h2>Shipping</h2>
+    <label for="city">City</label>
+    <input id="city" type="text" />
+    <label for="first">First name</label>
+    <input id="first" type="text" />
+    <h2>Newsletter</h2>
+    <label for="email">Email</label>
+    <input id="email" type="email" />`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithCity("Sydney"),
+    respond: answerAllConfident,
+  });
+  await bg.fill({ focusedSelector: "#city" });
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("city").value, "Sydney");
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "same heading group may also fill");
+  assert.equal(bg.page.document.getElementById("email").value, "", "other heading group left alone");
+});
+
+test("a focused field with no heading fills the fields that share its parent", async () => {
+  const html = `<!doctype html><title>Parents</title>
+    <div id="group-a">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+      <label for="city">City</label>
+      <input id="city" type="text" />
+    </div>
+    <div id="group-b">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </div>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithCity("Melbourne"),
+    respond: answerAllConfident,
+  });
+  await bg.fill({ focusedSelector: "#city" });
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("city").value, "Melbourne");
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "same parent may also fill");
+  assert.equal(bg.page.document.getElementById("email").value, "", "sibling parent left alone");
+});
+
+test("with nothing focused, the fill chooses the form tag with the most empty fields", async () => {
+  const html = `<!doctype html><title>Most empty</title>
+    <form id="small">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>
+    <form id="large">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+      <label for="city">City</label>
+      <input id="city" type="text" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "", "smaller form left alone");
+});
+
+test("with nothing focused and no form tag, the fill chooses the largest visual group", async () => {
+  const html = `<!doctype html><title>Largest group</title>
+    <h2>Tiny</h2>
+    <label for="email">Email</label>
+    <input id="email" type="email" />
+    <h2>Big</h2>
+    <label for="first">First name</label>
+    <input id="first" type="text" />
+    <label for="city">City</label>
+    <input id="city" type="text" />`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "", "smaller visual group left alone");
+});
+
+test("a tie goes to the first form in tree order", async () => {
+  const html = `<!doctype html><title>Tie</title>
+    <form id="first-form">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+    </form>
+    <form id="second-form">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "", "later tied form left alone");
+});
+
+test("a field that already has a value is left as it is", async () => {
+  const html = `<!doctype html><title>Occupied</title>
+    <form>
+      <label for="first">First name</label>
+      <input id="first" type="text" value="Sam" />
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithEmail("alex@example.com"),
+    respond: answerAllConfident,
+  });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Sam", "occupied field unchanged");
+  assert.equal(bg.page.document.getElementById("email").value, "alex@example.com");
+});
+
+test("FOCUS_CAPTURE from the page is used when FILL omits focusedSelector", async () => {
+  const html = `<!doctype html><title>Capture</title>
+    <form id="checkout">
+      <label for="first">First name</label>
+      <input id="first" type="text" />
+    </form>
+    <form id="newsletter">
+      <label for="email">Email</label>
+      <input id="email" type="email" />
+    </form>`;
+  const bg = loadBackground({
+    html,
+    storage: profileWithFirstName("Alex"),
+    respond: answerAllConfident,
+  });
+  await bg.send({ type: "FOCUS_CAPTURE", focusedSelector: "#first" }, { tab: { id: bg.tab.id } });
+  await bg.fill();
+  await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.page.document.getElementById("email").value, "");
+  assert.ok(bg.tabMessages.some((m) => m.type === "LIST_FORM" && m.focusedSelector === "#first"));
+});
+
+function logTexts(state) {
+  return state.logs.map((l) => l.text);
+}
+
+function twoFieldForm() {
+  return `<!doctype html><title>Signup</title>
+  <form id="signup">
+    <label for="first">First name</label>
+    <input id="first" name="first" type="text" />
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" />
+  </form>`;
+}
+
+function profileWithAliasAndEmail() {
+  const storage = profileWithFirstName("Alex");
+  storage.jevProfile.slots[0].aliases = ["First name"];
+  storage.jevProfile.answers.push({
+    slotId: "slot_personal_email",
+    situationId: null,
+    value: "alex@example.com",
+    optionWordings: [],
+  });
+  return storage;
+}
+
+test("429 with Retry-After waits the advised time, then the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) {
+        return jsonResponse(429, errorBody(429, "rate_limit_exceeded", "Free tier: 1 request per minute"), {
+          "Retry-After": "37",
+        });
+      }
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true, JSON.stringify(logTexts(state)));
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.calls.length, 2);
+  assert.ok(bg.calls[1].at - bg.calls[0].at >= 37000);
+  assert.ok(logTexts(state).some((t) => /rate limit reached — waiting 37s/.test(t)));
+});
+
+test("529 waits and retries, then the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) {
+        return jsonResponse(529, errorBody(529, "overloaded", "Jev is busy"), { "Retry-After": "2" });
+      }
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+  assert.equal(bg.calls.length, 2);
+  assert.ok(logTexts(state).some((t) => /Jev is overloaded/.test(t)));
+});
+
+test("429 without Retry-After on BeatAPI waits the free-tier 60s", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) return jsonResponse(429, errorBody(429, "rate_limit_exceeded", "Too many requests"));
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.ok(bg.calls[1].at - bg.calls[0].at >= 60000);
+});
+
+test("429 retries are bounded (5 calls max) and end with a clear error", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(429, errorBody(429, "rate_limit_exceeded", "slow down"), { "Retry-After": "1" }),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.running, false);
+  assert.equal(state.finished, false);
+  assert.equal(bg.calls.length, 5);
+  assert.match(state.lastError, /still rate-limiting/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.equal(state.check, null);
+});
+
+test("5xx is retried once, then the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) return jsonResponse(503, errorBody(503, "unavailable", "upstream busy"));
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.equal(bg.calls.length, 2);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+});
+
+test("a second consecutive 5xx stops the fill after 2 calls and shows the request id", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(502, errorBody(502, "upstream_error", "model unavailable", { request_id: "req_abc123" })),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 2);
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /HTTP 502.*model unavailable.*Request ID: req_abc123/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.equal(state.check, null);
+});
+
+test("5xx marked retryable:false fails immediately", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(500, errorBody(500, "internal", "bad schema", { retryable: false })),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 1);
+  assert.match(state.lastError, /HTTP 500.*bad schema/);
+});
+
+for (const [status, pattern] of [
+  [401, /rejected this API key \(HTTP 401\)/],
+  [402, /out of credits \(HTTP 402\)\. Top up at beatapi\.io\/dashboard\/billing/],
+  [403, /refused the request \(HTTP 403\)/],
+  [404, /does not recognise model “jev-1\.14-free” \(HTTP 404\)/],
+  [400, /rejected the request \(HTTP 400\) \(questions\.field_0\.criteria is empty\)/],
+  [422, /rejected the request \(HTTP 422\)/],
+]) {
+  test("HTTP " + status + " is not retried and stops the fill", async () => {
+    const bg = loadBackground({
+      html: SIMPLE_FORM,
+      storage: profileWithFirstName("Alex"),
+      respond: () => jsonResponse(status, errorBody(status, "err_" + status, "questions.field_0.criteria is empty")),
+    });
+    await bg.fill();
+    const state = await bg.idle();
+    assert.equal(bg.calls.length, 1, "must not burn retries on HTTP " + status);
+    assert.equal(state.running, false);
+    assert.match(state.lastError, pattern);
+    assert.equal(bg.page.document.getElementById("first").value, "");
+    assert.equal(state.check, null);
+  });
+}
+
+test("network errors retry twice then fail with a readable message", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => {
+      throw new TypeError("Failed to fetch");
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 3);
+  assert.match(state.lastError, /Could not reach BeatAPI: Failed to fetch/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+});
+
+test("timeouts retry and then report the 12s limit", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => {
+      throw timeoutError();
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.calls.length, 3);
+  assert.match(state.lastError, /did not respond within 12s/);
+});
+
+test("a single transient timeout is recovered and the fill succeeds", async () => {
+  let n = 0;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (request) => {
+      n += 1;
+      if (n === 1) throw timeoutError();
+      return confidentFirstName(request);
+    },
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true);
+  assert.equal(bg.page.document.getElementById("first").value, "Alex");
+});
+
+const malformed = [
+  ["no answers object", () => ({ id: "x", model: "jev-1.14-free" }), /without an answers object/],
+  ["non-JSON body", () => jsonResponse(200, undefined), /without an answers object/],
+  [
+    "answer not typed as choice",
+    (r) => {
+      const body = confidentFirstName(r);
+      const id = Object.keys(body.answers)[0];
+      body.answers[id] = { type: "text", text: "Alex" };
+      return body;
+    },
+    /did not return a typed Choice/,
+  ],
+  [
+    "hallucinated choice key",
+    (r) => {
+      const body = confidentFirstName(r);
+      const id = Object.keys(body.answers)[0];
+      body.answers[id] = { type: "choice", choice: "default:slot_not_real", confidence: 0.99 };
+      return body;
+    },
+    /was not an offered option/,
+  ],
+  [
+    "empty choice",
+    (r) => {
+      const body = confidentFirstName(r);
+      const id = Object.keys(body.answers)[0];
+      body.answers[id] = { type: "choice", choice: "", confidence: 0.99 };
+      return body;
+    },
+    /empty choice/,
+  ],
+];
+for (const [name, respond, pattern] of malformed) {
+  test("malformed response (" + name + ") stops the fill and writes nothing", async () => {
+    const bg = loadBackground({
+      html: SIMPLE_FORM,
+      storage: profileWithFirstName("Alex"),
+      respond,
+    });
+    await bg.fill();
+    const state = await bg.idle();
+    assert.equal(bg.calls.length, 1);
+    assert.equal(state.running, false);
+    assert.match(state.lastError, pattern);
+    assert.equal(bg.page.document.getElementById("first").value, "");
+    assert.equal(state.check, null);
+    assert.ok(!bg.tabMessages.some((m) => m.type === "WRITE_FIELD"));
+  });
+}
+
+test("Stop during a rate-limit wait cancels without further API calls", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: () => jsonResponse(429, errorBody(429, "rate_limit_exceeded", "wait"), { "Retry-After": "60" }),
+  });
+  const filling = bg.fill();
+  await bg.waitFor((s) => s.waitingUntil > 0, "rate-limit wait");
+  const stopped = await bg.send({ type: "STOP" });
+  assert.equal(stopped.running, false);
+  await filling;
+  for (let i = 0; i < 200; i += 1) await new Promise((r) => setImmediate(r));
+  assert.equal(bg.calls.length, 1);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+});
+
+test("a response that arrives after Stop does not write", async () => {
+  let resolveFetch;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (r) =>
+      new Promise((resolve) => {
+        resolveFetch = () => resolve(confidentFirstName(r));
+      }),
+  });
+  const filling = bg.fill();
+  await bg.waitFor(() => bg.calls.length === 1, "fetch in flight");
+  await bg.send({ type: "STOP" });
+  resolveFetch();
+  await filling;
+  for (let i = 0; i < 200; i += 1) await new Promise((r) => setImmediate(r));
+  assert.equal(bg.page.document.getElementById("first").value, "");
+  assert.ok(!bg.tabMessages.some((m) => m.type === "WRITE_FIELD"));
+  const state = await bg.status();
+  assert.equal(state.running, false);
+  assert.equal(state.lastError, "");
+  assert.equal(state.check, null);
+});
+
+test("a failed call keeps local alias writes and opens no check", async () => {
+  const bg = loadBackground({
+    html: twoFieldForm(),
+    storage: profileWithAliasAndEmail(),
+    respond: () => jsonResponse(401, errorBody(401, "invalid_api_key", "bad key")),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(bg.page.document.getElementById("first").value, "Alex", "alias hit stays written");
+  assert.equal(bg.page.document.getElementById("email").value, "", "undecided field not written");
+  assert.equal(state.running, false);
+  assert.equal(state.check, null);
+  assert.match(state.lastError, /rejected this API key/);
+  assert.equal(bg.calls.length, 1);
+});
+
+test("scripting blocked by Chrome ends the fill with an explanation", async () => {
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    scriptingError: "Cannot access contents of the page. Extension manifest must request permission.",
+    respond: () => assert.fail("must not call API"),
+  });
+  await bg.fill();
+  const state = await bg.idle();
+  assert.match(state.lastError, /doesn't allow Jev to access this page/);
+  assert.equal(bg.calls.length, 0);
+});
+
+test("closing the tab mid-fill ends with an explanation", async () => {
+  let bgRef;
+  const bg = loadBackground({
+    html: SIMPLE_FORM,
+    storage: profileWithFirstName("Alex"),
+    respond: (r) => {
+      bgRef.closeTab();
+      return confidentFirstName(r);
+    },
+  });
+  bgRef = bg;
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /tab Jev was working on was closed/);
+  assert.equal(bg.page.document.getElementById("first").value, "");
+});
+
+test("a field in an open shadow root can be filled; the launcher is not a field", async () => {
+  const bg = loadBackground({
+    html: `<!doctype html><title>Shadow</title>
+      <form id="signup"><div id="shadow-host"></div></form>
+      <div id="jev-fast-launcher-root"></div>`,
+    storage: profileWithFirstName("Alex"),
+    respond: confidentFirstName,
+  });
+  const host = bg.page.document.getElementById("shadow-host");
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = `<label for="first">First name</label><input id="first" type="text" />`;
+
+  const launcher = bg.page.document.getElementById("jev-fast-launcher-root");
+  const launcherShadow = launcher.attachShadow({ mode: "open" });
+  launcherShadow.innerHTML = `<label for="fake">Launcher decoy</label><input id="fake" type="text" />`;
+
+  await bg.fill();
+  const state = await bg.idle();
+  assert.equal(state.finished, true, JSON.stringify(logTexts(state)));
+  assert.equal(shadow.getElementById("first").value, "Alex");
+  assert.equal(launcherShadow.getElementById("fake").value, "");
+  const body = bg.calls[0].request;
+  assert.deepEqual(
+    body.state.fields.map((f) => f.wording),
+    ["First name"]
+  );
 });
 
 function profileWithCountry(answer, optionWordings) {

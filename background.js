@@ -91,10 +91,25 @@ const session = {
   minIntervalMs: 0,
   lastRequestAt: 0,
   profile: null,
+  pendingChecks: [],
+  fillGeneration: 0,
+  focusedSelector: null,
+  /** @type {{ tabId: number|null, selector: string|null }} */
+  capturedFocus: { tabId: null, selector: null },
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || !isControlMessage(message.type)) return false;
+  if (!message || !message.type) return false;
+  if (message.type === "FOCUS_CAPTURE") {
+    const tabId = sender && sender.tab && sender.tab.id != null ? sender.tab.id : null;
+    session.capturedFocus = {
+      tabId,
+      selector: message.focusedSelector ? String(message.focusedSelector) : null,
+    };
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (!isControlMessage(message.type)) return false;
   handleMessage(message, sender)
     .then((result) => sendResponse(result))
     .catch((err) => {
@@ -124,14 +139,26 @@ async function handleMessage(message, sender) {
     stopFill("Stopped by you.");
     return publicState();
   }
+  if (type === "SKIP") {
+    await skipCheck();
+    return publicState();
+  }
+  if (type === "RESOLVE_CHECK") {
+    await resolveCheck(message);
+    return publicState();
+  }
   if (type === "FILL") {
-    await startFill(message.apiKey, message.provider, sender && sender.tab, message.endpoint);
+    await startFill(message.apiKey, message.provider, sender && sender.tab, message.endpoint, message.focusedSelector);
+    return publicState();
+  }
+  if (type === "UNDO") {
+    // Undo persistence lands in a later ticket.
     return publicState();
   }
   return publicState();
 }
 
-async function startFill(apiKey, providerId, senderTab, endpointOverride) {
+async function startFill(apiKey, providerId, senderTab, endpointOverride, focusedSelector) {
   const key = String(apiKey || "").trim();
   const provider = PROVIDERS[providerId] || PROVIDERS.beatapi;
   const endpoint = resolveEndpoint(provider, endpointOverride);
@@ -143,7 +170,9 @@ async function startFill(apiKey, providerId, senderTab, endpointOverride) {
     broadcast();
     return;
   }
-  if (session.running) throw new Error("A fill is already in progress. Stop it before starting another.");
+  if (session.running || session.check) {
+    throw new Error("A fill is already in progress. Stop it before starting another.");
+  }
 
   const tab = await resolveTargetTab(senderTab);
   const sameProvider =
@@ -162,9 +191,12 @@ async function startFill(apiKey, providerId, senderTab, endpointOverride) {
   session.resolvedModel = "";
   session.logs = [];
   session.check = null;
+  session.pendingChecks = [];
+  session.fillGeneration = generation;
   session.undoAvailable = false;
   session.waitingUntil = 0;
   session.waitReason = "";
+  session.focusedSelector = resolveFocusedSelector(focusedSelector, tab.id);
   if (!sameProvider) {
     session.minIntervalMs = 0;
     session.lastRequestAt = 0;
@@ -185,6 +217,21 @@ async function startFill(apiKey, providerId, senderTab, endpointOverride) {
   }
 }
 
+function resolveFocusedSelector(fromMessage, tabId) {
+  if (fromMessage != null && String(fromMessage).trim()) {
+    session.capturedFocus = { tabId: null, selector: null };
+    return String(fromMessage);
+  }
+  const captured = session.capturedFocus;
+  if (captured && captured.tabId === tabId && captured.selector) {
+    const selector = captured.selector;
+    session.capturedFocus = { tabId: null, selector: null };
+    return selector;
+  }
+  session.capturedFocus = { tabId: null, selector: null };
+  return null;
+}
+
 async function runFill(generation) {
   await waitForTabReady(session.tabId);
   if (!isCurrent(generation)) return;
@@ -194,7 +241,9 @@ async function runFill(generation) {
   const profile = await loadProfile();
   session.profile = profile;
 
-  const listed = await sendToTab(session.tabId, { type: "LIST_FORM" });
+  const listMessage = { type: "LIST_FORM" };
+  if (session.focusedSelector) listMessage.focusedSelector = session.focusedSelector;
+  const listed = await sendToTab(session.tabId, listMessage);
   if (!isCurrent(generation)) return;
   if (!listed || !listed.ok) throw new Error((listed && listed.error) || "Could not read the form on this page.");
   const fields = listed.fields || [];
@@ -204,18 +253,25 @@ async function runFill(generation) {
   }
 
   const undecided = [];
-  const pendingChecks = [];
+  const checks = [];
   for (const field of fields) {
+    if (!isCurrent(generation)) return;
     const local = matchAlias(profile, field);
     if (local && local.answer) {
       const outcome = await writeStoredAnswer(field, local.answer, generation);
       if (outcome === "check") {
-        pendingChecks.push(buildCheck(field, local.slot, local.situationId, outcomeReason(field, local.answer)));
+        checks.push(buildCheck(field, local.slot ? local.slot.id : null, local.situationId, outcomeReason(field, local.answer)));
       }
       continue;
     }
-    if (local && local.answer == null) {
-      // Missing answer becomes a check in later tickets; for now leave undecided for Jev.
+    if (local && local.slot && local.answer == null && local.situationId === undefined) {
+      // Slot hit whose heading is not an alias waits for Jev.
+      undecided.push(field);
+      continue;
+    }
+    if (local && local.slot && local.answer == null) {
+      checks.push(buildCheck(field, local.slot.id, local.situationId));
+      continue;
     }
     undecided.push(field);
   }
@@ -223,7 +279,10 @@ async function runFill(generation) {
   if (!undecided.length) {
     await saveProfile(profile);
     if (!isCurrent(generation)) return;
-    if (openNextCheck(pendingChecks)) return;
+    if (checks.length) {
+      beginChecks(checks, profile, generation);
+      return;
+    }
     finishFill("Filled from aliases.");
     return;
   }
@@ -231,38 +290,83 @@ async function runFill(generation) {
   const body = buildFillRequest(undecided, profile);
   const { payload, latencyMs } = await callJev(session.apiKey, body, generation);
   if (!isCurrent(generation)) return;
+  assertValidAnswers(undecided, payload, body.questions);
+  if (!isCurrent(generation)) return;
   session.resolvedModel = payload.model || session.provider.model;
   log("info", "Jev answered in " + latencyMs + "ms.", { kind: "jev", latencyMs });
 
   for (const field of undecided) {
     if (!isCurrent(generation)) return;
     const answer = payload.answers && payload.answers[field.id];
-    const check = await applyChoice(field, answer, profile, generation);
-    if (check) pendingChecks.push(check);
+    const outcome = await applyChoice(field, answer, profile, generation);
+    if (outcome && outcome.check) checks.push(outcome.check);
   }
 
   await saveProfile(profile);
   if (!isCurrent(generation)) return;
-  if (openNextCheck(pendingChecks)) return;
+  if (checks.length) {
+    beginChecks(checks, profile, generation);
+    return;
+  }
   finishFill("Fill complete.");
+}
+
+function assertValidAnswers(fields, payload, questions) {
+  const answers = payload && payload.answers;
+  if (!answers || typeof answers !== "object") {
+    throw new JevApiError("Jev returned a response without an answers object.", 200, "bad_response");
+  }
+  for (const field of fields) {
+    const answer = answers[field.id];
+    if (answer == null || typeof answer !== "object") {
+      throw new JevApiError("Jev returned no answer for “" + field.wording + "”.", 200, "bad_response");
+    }
+    if (answer.type !== "choice") {
+      throw new JevApiError("Jev did not return a typed Choice for “" + field.wording + "”.", 200, "bad_response");
+    }
+    const picked = String(answer.choice || "");
+    if (!picked) {
+      throw new JevApiError("Jev returned an empty choice for “" + field.wording + "”.", 200, "bad_response");
+    }
+    const criteria = (questions && questions[field.id] && questions[field.id].criteria) || {};
+    if (!(picked in criteria)) {
+      throw new JevApiError(
+        "Jev chose “" + picked + "” for “" + field.wording + "”, which was not an offered option.",
+        200,
+        "bad_response"
+      );
+    }
+  }
 }
 
 async function applyChoice(field, answer, profile, generation) {
   const confidence = choiceConfidence(answer);
   const picked = answer && answer.type === "choice" ? String(answer.choice || "") : "";
   if (!picked || picked === "none" || confidence < CONFIDENCE_THRESHOLD) {
-    // Checks open in a later ticket; confident writes are this ticket's scope.
-    return null;
+    const parsedLow = picked && picked !== "none" ? parseOptionKey(picked) : null;
+    const slotId = parsedLow && parsedLow.kind !== "new" ? parsedLow.slotId : null;
+    const situationId = parsedLow && parsedLow.kind === "situation" ? parsedLow.situationId : null;
+    return { check: buildCheck(field, slotId, situationId) };
   }
   const parsed = parseOptionKey(picked);
-  if (!parsed || parsed.kind === "new") return null;
+  if (!parsed) {
+    return { check: buildCheck(field, null, null) };
+  }
+  if (parsed.kind === "new") {
+    // Situational answers land in a later ticket; a new-situation choice is a check.
+    return { check: buildCheck(field, parsed.slotId, null) };
+  }
   const slot = profile.slots.find((s) => s.id === parsed.slotId);
-  if (!slot) return null;
+  if (!slot) {
+    return { check: buildCheck(field, null, null) };
+  }
   const stored = findAnswer(profile, parsed.slotId, parsed.situationId);
-  if (!stored) return null;
+  if (!stored) {
+    return { check: buildCheck(field, parsed.slotId, parsed.situationId) };
+  }
   const outcome = await writeStoredAnswer(field, stored, generation);
   if (outcome === "check") {
-    return buildCheck(field, slot, parsed.situationId, outcomeReason(field, stored));
+    return { check: buildCheck(field, slot.id, parsed.situationId, outcomeReason(field, stored)) };
   }
   addAlias(slot, field.wording);
   if (parsed.kind === "situation" && parsed.situationId && field.headingWording) {
@@ -270,6 +374,158 @@ async function applyChoice(field, answer, profile, generation) {
     if (situation) addAlias(situation, field.headingWording);
   }
   return null;
+}
+
+function buildCheck(field, preSelectedSlotId, preSelectedSituationId, reason) {
+  const needsOption = field && (field.kind === "select" || field.kind === "radio");
+  return {
+    fieldId: (field && (field.id || field.fieldId)) || "",
+    wording: (field && field.wording) || "",
+    headingWording: (field && field.headingWording) || "",
+    kind: (field && field.kind) || "text",
+    options: needsOption ? ((field && (field.options || field.optionLabels)) || []).slice() : [],
+    preSelectedSlotId: preSelectedSlotId || null,
+    preSelectedSituationId: preSelectedSituationId == null ? null : preSelectedSituationId,
+    proposedSlotName: String((field && field.wording) || "").trim(),
+    optionRequired: Boolean(needsOption),
+    optionLabels: needsOption ? ((field && (field.options || field.optionLabels)) || []).slice() : [],
+    reason: reason || "",
+  };
+}
+
+function beginChecks(checks, profile, generation) {
+  session.pendingChecks = checks.slice();
+  session.profile = profile;
+  session.fillGeneration = generation;
+  session.running = true;
+  openNextCheck();
+}
+
+function publicCheck(check, profile) {
+  if (!check) return null;
+  return {
+    fieldId: check.fieldId,
+    wording: check.wording,
+    headingWording: check.headingWording,
+    preSelectedSlotId: check.preSelectedSlotId,
+    preSelectedSituationId: check.preSelectedSituationId,
+    proposedSlotName: check.proposedSlotName,
+    optionRequired: Boolean(check.optionRequired),
+    optionLabels: Array.isArray(check.optionLabels) ? check.optionLabels.slice() : [],
+    reason: check.reason || "",
+    slots: (profile && profile.slots ? profile.slots : []).map((s) => ({ id: s.id, name: s.name })),
+  };
+}
+
+function openNextCheck() {
+  const next = session.pendingChecks.shift();
+  if (!next) {
+    session.check = null;
+    finishFill("Fill complete.");
+    return;
+  }
+  session.check = next;
+  log("warn", "Check: “" + next.wording + "”.", { kind: "check" });
+  broadcast();
+}
+
+async function skipCheck() {
+  if (!session.check) return;
+  const wording = session.check.wording;
+  session.check = null;
+  log("warn", "Skipped “" + wording + "”.", { kind: "skip" });
+  openNextCheck();
+}
+
+async function resolveCheck(message) {
+  if (!session.check) return;
+  const generation = session.fillGeneration;
+  if (!isCurrent(generation)) return;
+  const check = session.check;
+  let profile = session.profile || (await loadProfile());
+  const answerText = String((message && message.answer) || "").trim();
+  if (!answerText) {
+    session.lastError = "Type an answer before saving this check.";
+    broadcast();
+    return;
+  }
+
+  const mintName = String((message && message.mintName) || "").trim();
+  const slotId = String((message && message.slotId) || "").trim();
+  let slot = null;
+
+  if (!slotId) {
+    const name = mintName || check.proposedSlotName || check.wording;
+    if (!String(name || "").trim()) {
+      session.lastError = "Name the new slot before saving.";
+      broadcast();
+      return;
+    }
+    slot = mintSlot(profile, name, check.wording);
+  } else {
+    slot = profile.slots.find((s) => s.id === slotId);
+    if (!slot) {
+      session.lastError = "That slot is no longer in the profile.";
+      broadcast();
+      return;
+    }
+    addAlias(slot, check.wording);
+  }
+
+  // Situations stay default-only until ticket 04.
+  const storedAnswer = upsertAnswer(profile, slot.id, null, answerText);
+  await saveProfile(profile);
+  if (!isCurrent(generation)) return;
+
+  await writeStoredAnswer(check, storedAnswer, generation);
+  if (!isCurrent(generation)) return;
+
+  session.lastError = "";
+  session.check = null;
+  log("system", "Saved check for “" + check.wording + "”.", { kind: "check_saved" });
+  openNextCheck();
+}
+
+function mintSlot(profile, name, fieldWording) {
+  const trimmed = String(name || "").trim();
+  const id = uniqueSlotId(profile, trimmed);
+  const slot = { id: id, name: trimmed, aliases: [] };
+  const wording = String(fieldWording || "").trim();
+  if (wording) {
+    slot.aliases.push(wording);
+  }
+  profile.slots.push(slot);
+  return slot;
+}
+
+function uniqueSlotId(profile, name) {
+  const base = "slot_" + String(name || "slot")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 48);
+  const root = base || "slot_custom";
+  let id = root;
+  let n = 2;
+  const used = new Set(profile.slots.map((s) => s.id));
+  while (used.has(id)) {
+    id = root + "_" + n;
+    n += 1;
+  }
+  return id;
+}
+
+function upsertAnswer(profile, slotId, situationId, value) {
+  const existing = findAnswer(profile, slotId, situationId);
+  if (existing) {
+    existing.value = value;
+    if (!Array.isArray(existing.optionWordings)) existing.optionWordings = [];
+    return existing;
+  }
+  const row = { slotId: slotId, situationId: situationId, value: value, optionWordings: [] };
+  profile.answers.push(row);
+  return row;
 }
 
 /**
@@ -294,7 +550,7 @@ async function writeStoredAnswer(field, answerRecord, generation) {
     }
     const result = await sendToTab(session.tabId, {
       type: "WRITE_FIELD",
-      fieldId: field.id,
+      fieldId: field.id || field.fieldId,
       value: matchedLabel,
     });
     if (!isCurrent(generation)) return "skipped";
@@ -309,7 +565,11 @@ async function writeStoredAnswer(field, answerRecord, generation) {
     return "written";
   }
 
-  const result = await sendToTab(session.tabId, { type: "WRITE_FIELD", fieldId: field.id, value });
+  const result = await sendToTab(session.tabId, {
+    type: "WRITE_FIELD",
+    fieldId: field.id || field.fieldId,
+    value,
+  });
   if (!isCurrent(generation)) return "skipped";
   if (!result || !result.ok) {
     log("warn", "Could not write “" + field.wording + "”.");
@@ -319,13 +579,18 @@ async function writeStoredAnswer(field, answerRecord, generation) {
   return "written";
 }
 
+async function writeAndRemember(field, value, generation) {
+  return writeStoredAnswer(field, { value }, generation);
+}
+
 function matchOptionLabel(field, answerRecord) {
   const candidates = [answerRecord.value]
     .concat(answerRecord.optionWordings || [])
     .map(compareKey)
     .filter(Boolean);
   if (!candidates.length) return null;
-  for (const label of field.options || []) {
+  const options = (field && (field.options || field.optionLabels)) || [];
+  for (const label of options) {
     if (candidates.includes(compareKey(label))) return label;
   }
   return null;
@@ -350,31 +615,6 @@ function outcomeReason(field, answerRecord) {
     return "unmatched_option";
   }
   return "rejected";
-}
-
-function buildCheck(field, slot, situationId, reason) {
-  const needsOption = field.kind === "select" || field.kind === "radio";
-  return {
-    fieldId: field.id,
-    wording: field.wording,
-    headingWording: field.headingWording || "",
-    kind: field.kind || "text",
-    slotId: slot ? slot.id : null,
-    situationId: situationId == null ? null : situationId,
-    optionRequired: needsOption,
-    optionLabels: needsOption ? (field.options || []).slice() : [],
-    reason: reason || "",
-  };
-}
-
-function openNextCheck(pendingChecks) {
-  if (!pendingChecks || !pendingChecks.length) return false;
-  session.check = pendingChecks[0];
-  session.running = true;
-  session.finished = false;
-  log("info", "Check waiting for “" + session.check.wording + "”.", { kind: "check" });
-  broadcast();
-  return true;
 }
 
 function matchAlias(profile, field) {
@@ -565,6 +805,7 @@ function stopFill(reason) {
   session.generation += 1;
   session.running = false;
   session.check = null;
+  session.pendingChecks = [];
   session.waitingUntil = 0;
   session.waitReason = "";
   if (reason) log("warn", reason, { kind: "stopped" });
@@ -575,6 +816,7 @@ function finishFill(reason) {
   session.running = false;
   session.finished = true;
   session.check = null;
+  session.pendingChecks = [];
   session.waitingUntil = 0;
   session.waitReason = "";
   if (reason) log("done", reason, { kind: "finish" });
@@ -585,6 +827,7 @@ function failFill(err) {
   session.running = false;
   session.finished = false;
   session.check = null;
+  session.pendingChecks = [];
   session.waitingUntil = 0;
   session.waitReason = "";
   session.lastError = errorText(err);
@@ -762,7 +1005,7 @@ function httpErrorMessage(status, apiError, provider) {
       provider.name +
       " says the account is out of credits (HTTP 402)." +
       (provider.id === "beatapi"
-        ? " Top up at beatapi.io/dashboard/billing, or check the model is jev-1.13-free."
+        ? " Top up at beatapi.io/dashboard/billing, or check the model is " + provider.model + "."
         : " Top up your balance to continue.") +
       detail
     );
@@ -877,7 +1120,7 @@ function publicState() {
     running: session.running,
     finished: session.finished,
     lastError: session.lastError,
-    check: session.check,
+    check: publicCheck(session.check, session.profile),
     undoAvailable: session.undoAvailable,
     openSettings: session.openSettings,
     confidenceThreshold: CONFIDENCE_THRESHOLD,

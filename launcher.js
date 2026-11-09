@@ -218,6 +218,80 @@
   document.documentElement.appendChild(host);
   updateLauncherLabel(false);
 
+  /** Focused page element at the start of the launcher click, before the button takes focus. */
+  let capturedFocusedSelector = null;
+
+  function isExtensionUi(el) {
+    if (!el || !(el instanceof Element)) return false;
+    const root = el.getRootNode();
+    return Boolean(
+      el.closest("[data-jev-fast-ui]") ||
+        (root instanceof ShadowRoot && root.host && root.host.id === HOST_ID) ||
+        el === host ||
+        host.contains(el)
+    );
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
+    return String(value).replace(/"/g, '\"');
+  }
+
+  function elementSelector(el) {
+    if (!el || !(el instanceof Element) || el === document.documentElement || el === document.body) return null;
+    if (el.id) return "#" + cssEscape(el.id);
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      let part = node.tagName.toLowerCase();
+      if (node.id) {
+        parts.unshift("#" + cssEscape(node.id));
+        break;
+      }
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+        if (siblings.length > 1) {
+          part += ":nth-of-type(" + (siblings.indexOf(node) + 1) + ")";
+        }
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.length ? parts.join(" > ") : null;
+  }
+
+  function notifyFocusCapture() {
+    try {
+      chrome.runtime.sendMessage({
+        type: "FOCUS_CAPTURE",
+        focusedSelector: capturedFocusedSelector,
+      });
+    } catch {
+      // Service worker may be waking; FILL can still receive a selector from the popup.
+    }
+    if (frame && frame.contentWindow) {
+      try {
+        frame.contentWindow.postMessage(
+          { source: "jev-fast-launcher", type: "FOCUS_CAPTURE", focusedSelector: capturedFocusedSelector },
+          "*"
+        );
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function captureFocusedElement() {
+    const el = document.activeElement;
+    if (!el || el === document.body || el === document.documentElement || isExtensionUi(el)) {
+      capturedFocusedSelector = null;
+    } else {
+      capturedFocusedSelector = elementSelector(el);
+    }
+    notifyFocusCapture();
+  }
+
   function ensureFrame() {
     if (frame) return frame;
     frame = document.createElement("iframe");
@@ -261,6 +335,9 @@
     if (!visible && isOpen()) setOpen(false, { focus: false });
   }
 
+  // Capture focus before the button steals it (pointerdown runs before focus moves).
+  launcher.addEventListener("pointerdown", captureFocusedElement, true);
+  launcher.addEventListener("mousedown", captureFocusedElement, true);
   launcher.addEventListener("click", () => setOpen(!isOpen()));
 
   window.addEventListener(
@@ -276,6 +353,12 @@
     const data = event.data;
     if (!data || data.source !== "jev-fast") return;
     if (data.type === "CLOSE") setOpen(false);
+    if (data.type === "GET_FOCUS_CAPTURE") {
+      frame.contentWindow.postMessage(
+        { source: "jev-fast-launcher", type: "FOCUS_CAPTURE", focusedSelector: capturedFocusedSelector },
+        "*"
+      );
+    }
   });
 
   chrome.runtime.onMessage.addListener((message) => {
