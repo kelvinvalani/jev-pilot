@@ -289,12 +289,14 @@
   }
 
   function fieldWording(el) {
+    const root = el.getRootNode();
+    const scope = root instanceof Document || root instanceof ShadowRoot ? root : document;
     const labelledBy = el.getAttribute("aria-labelledby");
     if (labelledBy) {
       const text = labelledBy
         .split(/\s+/)
         .map((id) => {
-          const node = document.getElementById(id);
+          const node = scope.getElementById ? scope.getElementById(id) : document.getElementById(id);
           return node ? innerText(node) : "";
         })
         .join(" ")
@@ -304,7 +306,7 @@
     const aria = String(el.getAttribute("aria-label") || "").trim();
     if (aria) return clip(aria, LABEL_MAX);
     if (el.id) {
-      const forLabel = document.querySelector('label[for="' + cssEscape(el.id) + '"]');
+      const forLabel = scope.querySelector('label[for="' + cssEscape(el.id) + '"]');
       if (forLabel) {
         const text = innerText(forLabel);
         if (text) return clip(text, LABEL_MAX);
