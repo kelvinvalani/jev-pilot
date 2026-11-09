@@ -257,8 +257,11 @@ async function runFill(generation) {
   for (const field of fields) {
     if (!isCurrent(generation)) return;
     const local = matchAlias(profile, field);
-    if (local && local.answer != null) {
-      await writeAndRemember(field, local.answer, generation);
+    if (local && local.answer) {
+      const outcome = await writeStoredAnswer(field, local.answer, generation);
+      if (outcome === "check") {
+        checks.push(buildCheck(field, local.slot ? local.slot.id : null, local.situationId, outcomeReason(field, local.answer)));
+      }
       continue;
     }
     if (local && local.slot && local.answer == null && local.situationId === undefined) {
@@ -361,7 +364,10 @@ async function applyChoice(field, answer, profile, generation) {
   if (!stored) {
     return { check: buildCheck(field, parsed.slotId, parsed.situationId) };
   }
-  await writeAndRemember(field, stored.value, generation);
+  const outcome = await writeStoredAnswer(field, stored, generation);
+  if (outcome === "check") {
+    return { check: buildCheck(field, slot.id, parsed.situationId, outcomeReason(field, stored)) };
+  }
   addAlias(slot, field.wording);
   if (parsed.kind === "situation" && parsed.situationId && field.headingWording) {
     const situation = profile.situations.find((s) => s.id === parsed.situationId);
@@ -370,16 +376,20 @@ async function applyChoice(field, answer, profile, generation) {
   return null;
 }
 
-function buildCheck(field, preSelectedSlotId, preSelectedSituationId) {
+function buildCheck(field, preSelectedSlotId, preSelectedSituationId, reason) {
+  const needsOption = field && (field.kind === "select" || field.kind === "radio");
   return {
-    fieldId: field.id,
-    wording: field.wording || "",
-    headingWording: field.headingWording || "",
+    fieldId: (field && (field.id || field.fieldId)) || "",
+    wording: (field && field.wording) || "",
+    headingWording: (field && field.headingWording) || "",
+    kind: (field && field.kind) || "text",
+    options: needsOption ? ((field && (field.options || field.optionLabels)) || []).slice() : [],
     preSelectedSlotId: preSelectedSlotId || null,
     preSelectedSituationId: preSelectedSituationId == null ? null : preSelectedSituationId,
-    proposedSlotName: String(field.wording || "").trim(),
-    optionRequired: false,
-    optionLabels: [],
+    proposedSlotName: String((field && field.wording) || "").trim(),
+    optionRequired: Boolean(needsOption),
+    optionLabels: needsOption ? ((field && (field.options || field.optionLabels)) || []).slice() : [],
+    reason: reason || "",
   };
 }
 
@@ -402,6 +412,7 @@ function publicCheck(check, profile) {
     proposedSlotName: check.proposedSlotName,
     optionRequired: Boolean(check.optionRequired),
     optionLabels: Array.isArray(check.optionLabels) ? check.optionLabels.slice() : [],
+    reason: check.reason || "",
     slots: (profile && profile.slots ? profile.slots : []).map((s) => ({ id: s.id, name: s.name })),
   };
 }
@@ -462,11 +473,11 @@ async function resolveCheck(message) {
   }
 
   // Situations stay default-only until ticket 04.
-  upsertAnswer(profile, slot.id, null, answerText);
+  const storedAnswer = upsertAnswer(profile, slot.id, null, answerText);
   await saveProfile(profile);
   if (!isCurrent(generation)) return;
 
-  await writeAndRemember({ id: check.fieldId, wording: check.wording }, answerText, generation);
+  await writeStoredAnswer(check, storedAnswer, generation);
   if (!isCurrent(generation)) return;
 
   session.lastError = "";
@@ -509,6 +520,7 @@ function upsertAnswer(profile, slotId, situationId, value) {
   const existing = findAnswer(profile, slotId, situationId);
   if (existing) {
     existing.value = value;
+    if (!Array.isArray(existing.optionWordings)) existing.optionWordings = [];
     return existing;
   }
   const row = { slotId: slotId, situationId: situationId, value: value, optionWordings: [] };
@@ -516,15 +528,93 @@ function upsertAnswer(profile, slotId, situationId, value) {
   return row;
 }
 
-async function writeAndRemember(field, value, generation) {
-  if (!isCurrent(generation)) return;
-  const result = await sendToTab(session.tabId, { type: "WRITE_FIELD", fieldId: field.id, value });
-  if (!isCurrent(generation)) return;
+/**
+ * Writes a stored answer into a field. Dropdowns and radios are matched on this
+ * machine from the answer string and option wordings. Returns "written",
+ * "check", or "skipped".
+ */
+async function writeStoredAnswer(field, answerRecord, generation) {
+  if (!isCurrent(generation) || !answerRecord) return "skipped";
+  const value = answerRecord.value == null ? "" : String(answerRecord.value);
+
+  if (field.kind === "date" && !isIsoDate(value)) {
+    log("warn", "Date control needs YYYY-MM-DD for “" + field.wording + "”.");
+    return "check";
+  }
+
+  if (field.kind === "select" || field.kind === "radio") {
+    const matchedLabel = matchOptionLabel(field, answerRecord);
+    if (!matchedLabel) {
+      log("warn", "No option matched “" + field.wording + "”.");
+      return "check";
+    }
+    const result = await sendToTab(session.tabId, {
+      type: "WRITE_FIELD",
+      fieldId: field.id || field.fieldId,
+      value: matchedLabel,
+    });
+    if (!isCurrent(generation)) return "skipped";
+    if (!result || !result.ok) {
+      log("warn", "Could not write “" + field.wording + "”.");
+      return "check";
+    }
+    rememberOptionWording(answerRecord, result.selectedLabel || matchedLabel);
+    log("system", "Wrote “" + (result.selectedLabel || matchedLabel) + "” into " + field.wording + ".", {
+      kind: "write",
+    });
+    return "written";
+  }
+
+  const result = await sendToTab(session.tabId, {
+    type: "WRITE_FIELD",
+    fieldId: field.id || field.fieldId,
+    value,
+  });
+  if (!isCurrent(generation)) return "skipped";
   if (!result || !result.ok) {
     log("warn", "Could not write “" + field.wording + "”.");
-    return;
+    return "check";
   }
   log("system", "Wrote “" + value + "” into " + field.wording + ".", { kind: "write" });
+  return "written";
+}
+
+async function writeAndRemember(field, value, generation) {
+  return writeStoredAnswer(field, { value }, generation);
+}
+
+function matchOptionLabel(field, answerRecord) {
+  const candidates = [answerRecord.value]
+    .concat(answerRecord.optionWordings || [])
+    .map(compareKey)
+    .filter(Boolean);
+  if (!candidates.length) return null;
+  const options = (field && (field.options || field.optionLabels)) || [];
+  for (const label of options) {
+    if (candidates.includes(compareKey(label))) return label;
+  }
+  return null;
+}
+
+function rememberOptionWording(answerRecord, label) {
+  const text = String(label || "").trim();
+  if (!text || !answerRecord) return;
+  const key = compareKey(text);
+  const existing = (answerRecord.optionWordings || []).map(compareKey);
+  if (existing.includes(key)) return;
+  answerRecord.optionWordings = (answerRecord.optionWordings || []).concat([text]);
+}
+
+function isIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function outcomeReason(field, answerRecord) {
+  if (field.kind === "date" && !isIsoDate(answerRecord && answerRecord.value)) return "bad_date";
+  if ((field.kind === "select" || field.kind === "radio") && !matchOptionLabel(field, answerRecord)) {
+    return "unmatched_option";
+  }
+  return "rejected";
 }
 
 function matchAlias(profile, field) {
@@ -535,13 +625,13 @@ function matchAlias(profile, field) {
     const heading = compareKey(field.headingWording);
     if (!heading) {
       const answer = findAnswer(profile, slot.id, null);
-      return { slot, situationId: null, answer: answer ? answer.value : null };
+      return { slot, situationId: null, answer: answer || null };
     }
     for (const situation of profile.situations) {
       const situationNames = [situation.name].concat(situation.aliases || []).map(compareKey);
       if (!situationNames.includes(heading)) continue;
       const answer = findAnswer(profile, slot.id, situation.id);
-      return { slot, situationId: situation.id, answer: answer ? answer.value : null };
+      return { slot, situationId: situation.id, answer: answer || null };
     }
     return { slot, situationId: undefined, answer: undefined };
   }
@@ -663,7 +753,14 @@ async function loadProfile() {
   return {
     slots: stored.slots.slice(),
     situations: Array.isArray(stored.situations) ? stored.situations.slice() : [],
-    answers: Array.isArray(stored.answers) ? stored.answers.slice() : [],
+    answers: Array.isArray(stored.answers)
+      ? stored.answers.map((a) => ({
+          slotId: a.slotId,
+          situationId: a.situationId == null ? null : a.situationId,
+          value: a.value == null ? "" : String(a.value),
+          optionWordings: Array.isArray(a.optionWordings) ? a.optionWordings.slice() : [],
+        }))
+      : [],
   };
 }
 
